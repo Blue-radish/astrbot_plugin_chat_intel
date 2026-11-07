@@ -37,7 +37,30 @@ CAP_JOBS = 8
 CAP_AI_NEWS = 6
 CAP_QUOTES = 4
 
+IMG_CACHE_VERSION = 3  # 判据说辞变化时 +1，旧缓存作废
+
 CHUNK_CHARS = 55000  # 单次喂给模型的转录上限，超了切片后合并
+
+VISION_PROMPT = """这是群聊里出现的一张图片。判断它作为「技术情报」的配图有没有保留价值。
+
+值得留（keep=true）：
+- 报错窗口、异常堆栈、编译或运行失败提示
+- 代码、终端、日志、命令行输出
+- 架构图、流程图、电路或硬件图纸、协议时序图
+- 技术类数据图表、性能曲线、监控面板（接口耗时、压测、资源占用这类）
+- 论文、文档、规范、接口说明的截图
+- 招聘或职位信息、JD、薪资与面试相关截图
+- 群聊或论坛里关于技术、行业、就业话题的讨论截图（例如硬件行情、模型发布、公司动向、裁员或招聘）
+
+不该留（keep=false）：
+- 表情包、梗图、二次元或动漫图、摄影照片、自拍、游戏画面、纯风景
+- 没有可读信息的截图
+- 生活类 App 界面：睡眠、健康、运动、天气、购物、外卖、记账
+- 个人社交动态：朋友圈、微博、小红书里的晒图或情绪帖
+
+遇到模棱两可的，按「读者是学计算机、写代码、找工作的人，这图对他有没有信息价值」来判断，没有就 false。
+
+只输出 JSON：{"keep": true 或 false, "kind": "报错截图/代码/终端/图表/文档/招聘/讨论截图/电路图纸/表情包/照片/动漫/游戏/生活界面/社交动态/其他", "text": "图里能看清的文字，摘录不超过 24 字，看不清就给空字符串"}"""
 
 IMAGE_PICK_PROMPT = """下面是群聊里出现过的候选图片，每行给出：编号、发送者、时间、这条消息的文字、上下文。
 
@@ -114,7 +137,7 @@ USER_PROMPT_TEMPLATE = """下面是群「{group}」在 {window} 的聊天记录�
 {transcript}"""
 
 
-@register(PLUGIN_NAME, "Ray", "多群技术情报日报：只留技术向内容，本地排版成图，静默私聊投递", "1.1.0")
+@register(PLUGIN_NAME, "Ray", "多群技术情报日报：只留技术向内容，视觉模型筛图，本地排版成图，静默私聊投递", "1.2.0")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -853,9 +876,23 @@ class TechDigestPlugin(Star):
     async def _select_images(
         self, records: list[dict], topic_people: set[str]
     ) -> list[dict]:
-        """先按尺寸与文字线索硬过滤，再让模型看上下文做最后一道减法。"""
+        """有视觉模型就让它看图判类型；没有才退回尺寸/文字规则。"""
         if not self.include_images or self.max_images <= 0:
             return []
+        candidates = self._image_candidates(records)
+        if not candidates:
+            return []
+        provider = self._get_vision_provider()
+        if provider is not None:
+            kept = await self._vision_picks(provider, candidates)
+        else:
+            kept = await self._rule_picks(candidates, topic_people)
+        if not kept:
+            return []
+        kept.sort(key=lambda c: int(c["rec"].get("t") or 0))
+        return [self._image_entry(c) for c in kept[: self.max_images]]
+
+    def _image_candidates(self, records: list[dict]) -> list[dict]:
         candidates: list[dict] = []
         for idx, rec in enumerate(records):
             files = [
@@ -865,46 +902,138 @@ class TechDigestPlugin(Star):
             ]
             if not files:
                 continue
-            width, height = self._image_dims(files[0])
-            prev_text = str(records[idx - 1].get("text") or "") if idx > 0 else ""
-            next_text = (
-                str(records[idx + 1].get("text") or "")
-                if idx + 1 < len(records)
-                else ""
-            )
-            if not self._image_worth_keeping(rec, prev_text, next_text, width, height):
-                continue
             candidates.append(
                 {
                     "rec": rec,
                     "files": files,
-                    "meta": f"{width}x{height}",
-                    "prev": prev_text,
-                    "next": next_text,
+                    "prev": str(records[idx - 1].get("text") or "") if idx > 0 else "",
+                    "next": str(records[idx + 1].get("text") or "")
+                    if idx + 1 < len(records)
+                    else "",
                 }
             )
-        if not candidates:
+        return candidates[-20:]  # 太多图就别全问了，取最近的 20 条
+
+    async def _vision_picks(
+        self, provider, candidates: list[dict]
+    ) -> list[dict]:
+        """并发送图给视觉模型判断，只留技术相关的截图。结果会缓存到 state.json。"""
+        if self.state.get("images_version") != IMG_CACHE_VERSION:
+            self.state["images"] = {}
+            self.state["images_version"] = IMG_CACHE_VERSION
+        cache = self.state.setdefault("images", {})
+        semaphore = asyncio.Semaphore(3)
+        results: dict[str, dict] = {}
+
+        async def judge(cand: dict) -> None:
+            path = cand["files"][0]
+            key = path.name
+            cached = cache.get(key)
+            if isinstance(cached, dict) and "keep" in cached:
+                results[key] = cached
+                return
+            async with semaphore:
+                verdict = await self._classify_image(provider, path)
+            if verdict is None:
+                return
+            results[key] = verdict
+            cache[key] = verdict
+
+        await asyncio.gather(*(judge(c) for c in candidates))
+
+        kept: list[dict] = []
+        dropped: list[str] = []
+        for cand in candidates:
+            verdict = results.get(cand["files"][0].name)
+            if verdict and verdict.get("keep"):
+                cand["kind"] = verdict.get("kind") or ""
+                cand["ocr"] = verdict.get("text") or ""
+                kept.append(cand)
+            else:
+                dropped.append(f"{cand['files'][0].name}:{(verdict or {}).get('kind', '?')}")
+        logger.info(
+            f"[{PLUGIN_NAME}] 视觉判定 {len(candidates)} 张候选：留 {len(kept)} 张"
+            f"，丢弃 {len(candidates) - len(kept)} 张（其中 {len(results)} 张有判定）"
+        )
+        if dropped and len(dropped) <= 8:
+            logger.info(f"[{PLUGIN_NAME}] 丢弃明细: {'; '.join(dropped)}")
+        return kept[-self.max_images :]
+
+    async def _rule_picks(self, candidates: list[dict], topic_people: set[str]) -> list[dict]:
+        """没有视觉模型时的退路：尺寸/形状 + 文字线索，再让模型看上下文做减法。"""
+        filtered = []
+        for cand in candidates:
+            width, height = self._image_dims(cand["files"][0])
+            if self._image_worth_keeping(
+                cand["rec"], cand["prev"], cand["next"], width, height
+            ):
+                filtered.append(cand)
+        if not filtered:
             return []
-        candidates = candidates[-12:]
-
-        picks = await self._ask_which_images(candidates)
+        filtered = filtered[-12:]
+        picks = await self._ask_which_images(filtered)
         if picks is None:
-            picks = self._heuristic_image_picks(candidates, topic_people)
-
-        selected: list[dict] = []
+            picks = self._heuristic_image_picks(filtered, topic_people)
+        out = []
         for i in picks:
-            if not 0 <= i < len(candidates):
-                continue
-            cand = candidates[i]
-            rec = cand["rec"]
-            ts = int(rec.get("t") or 0)
-            name = str(rec.get("name") or "?")
-            stamp = datetime.fromtimestamp(ts).strftime("%m-%d %H:%M") if ts else ""
-            selected.append({"path": str(cand["files"][0]), "caption": f"{name} · {stamp}"})
-            if len(selected) >= self.max_images:
-                break
-        selected.sort(key=lambda i: i["caption"])
-        return selected
+            if 0 <= i < len(filtered):
+                cand = filtered[i]
+                cand["kind"] = "规则筛选"
+                out.append(cand)
+        return out
+
+    def _image_entry(self, cand: dict) -> dict:
+        rec = cand["rec"]
+        ts = int(rec.get("t") or 0)
+        name = str(rec.get("name") or "?")
+        stamp = datetime.fromtimestamp(ts).strftime("%m-%d %H:%M") if ts else ""
+        caption = f"{name} · {stamp}"
+        kind = str(cand.get("kind") or "").strip()
+        if kind:
+            caption += f" · {kind}"
+        return {"path": str(cand["files"][0]), "caption": caption}
+
+    async def _classify_image(self, provider, path: Path) -> dict | None:
+        try:
+            resp = await provider.text_chat(
+                prompt=VISION_PROMPT,
+                image_urls=[str(path)],
+                contexts=[],
+                system_prompt="你只判断图片类型，判断克制，宁严勿松。",
+            )
+            text = getattr(resp, "completion_text", "") or ""
+        except Exception as e:
+            logger.warning(f"[{PLUGIN_NAME}] 识图失败 {path.name}: {e}")
+            return None
+        data = self._parse_json(text)
+        if not isinstance(data, dict):
+            return None
+        return {
+            "keep": bool(data.get("keep")),
+            "kind": str(data.get("kind") or "").strip()[:12],
+            "text": str(data.get("text") or "").strip()[:24],
+        }
+
+    def _get_vision_provider(self):
+        pid = str(self.config.get("vision_provider_id") or "").strip()
+        provider = None
+        if pid:
+            try:
+                provider = self.context.provider_manager.get_provider_by_id(pid)
+            except Exception:
+                provider = None
+        if provider is None:
+            provider = self._get_provider()
+        if provider is None:
+            return None
+        cfg = getattr(provider, "provider_config", None)
+        modalities = cfg.get("modalities") if isinstance(cfg, dict) else None
+        if isinstance(modalities, list) and "image" not in modalities:
+            logger.info(
+                f"[{PLUGIN_NAME}] 当前模型不支持图片输入，图片退回规则筛选"
+            )
+            return None
+        return provider
 
     async def _ask_which_images(self, candidates: list[dict]) -> list[int] | None:
         provider = self._get_provider()

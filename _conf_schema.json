@@ -68,6 +68,12 @@
     "description": "指定模型供应商 id，留空用 AstrBot 默认",
     "default": ""
   },
+  "vision_provider_id": {
+    "type": "string",
+    "description": "判图用的视觉模型供应商 id，留空则用上面那个（模型需支持图片输入）",
+    "default": "",
+    "hint": "图片取舍靠它看图判断；留空且模型不支持读图时，退回尺寸/文字规则"
+  },
   "keep_quotes": {
     "type": "bool",
     "description": "是否保留「今日圣经」金句板块",
