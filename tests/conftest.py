@@ -40,9 +40,9 @@ def make_plugin(**attrs):
     p.ignore_uids = set(attrs.pop("ignore_uids", []))
     p.use_local_store = attrs.pop("use_local_store", True)
     p.include_images = attrs.pop("include_images", True)
-    p.max_images = attrs.pop("max_images", 6)
+    p.max_images = attrs.pop("max_images", 4)
     p.max_messages = attrs.pop("max_messages", 10000)
-    p.keep_quotes_unused = attrs.pop("keep_quotes_unused", True)
+    
     p.report_title = attrs.pop("report_title", "群聊情报")
     p.render_ppi = attrs.pop("render_ppi", 72)
     p.font_dir = attrs.pop("font_dir", "")
@@ -58,7 +58,8 @@ def make_plugin(**attrs):
     p.smart_parse = attrs.pop("smart_parse", False)
     p.keep_days = attrs.pop("keep_days", 7)
     p._running = attrs.pop("_running", False)
-    p._pending = attrs.pop("_pending", None)
+    from collections import deque
+    p._queue = attrs.pop("_queue", deque(maxlen=2))
     p._llm_blocked = attrs.pop("_llm_blocked", 0)
     p._result_blocked = attrs.pop("_result_blocked", 0)
     p._silenced = attrs.pop("_silenced", 0)

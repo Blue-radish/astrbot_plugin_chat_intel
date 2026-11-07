@@ -1,61 +1,63 @@
 ﻿{
   "chats": {
     "type": "template_list",
-    "description": "要总结的群（一行一个群，每群一份自己的兴趣）",
-    "hint": "报告里只显示群名；同一个群号写了两行只会用第一行",
+    "description": "要总结的群",
+    "hint": "点下面的「添加」加一行，每行一个群；群号必填（机器人要已经在群里），「关心的标签」也必填，没填的群会被跳过并在私聊里提醒你",
     "templates": {
       "chat": {
         "name": "群",
         "items": {
           "gid": {
             "type": "string",
-            "description": "群号",
-            "default": ""
-          },
-          "platform": {
-            "type": "string",
-            "description": "用哪个 bot 拉这个群（平台 id，留空用下面的默认平台）",
-            "default": ""
+            "description": "群号（必填，机器人要在群里）",
+            "default": "",
+            "hint": "纯数字，例如 220002"
           },
           "name": {
             "type": "string",
-            "description": "群名备注（留空自动检测）",
+            "description": "群名备注（留空自动取群名）",
+            "default": ""
+          },
+          "tags_pos": {
+            "type": "text",
+            "description": "关心的标签（必填）：一行一个或逗号分隔",
+            "default": "",
+            "hint": "这些标签会印在对应话题卡上，模型也只整理相关的聊天。没填的群仍会采集消息，但不会生成报告。写具体些更准，例如 本地部署大模型、复古硬件维修"
+          },
+          "tags_neg": {
+            "type": "text",
+            "description": "不要的标签（可空）：一行一个或逗号分隔",
+            "default": "",
+            "hint": "告诉模型哪些话题别收，例如 二手交易、砍价。由模型按语义判断，不是严格的过滤器"
+          },
+          "platform": {
+            "type": "string",
+            "description": "读历史用的账号（留空用下面的默认账号）",
             "default": ""
           },
           "title": {
             "type": "string",
             "description": "这份报告的标题（留空用全局标题）",
             "default": ""
-          },
-          "tags_pos": {
-            "type": "text",
-            "description": "关心的标签：一行一个（或逗号分隔），比如 电脑、动漫、科研",
-            "default": "",
-            "hint": "只有打了这些标签的话题才会进报告；写具体些更准，例如 本地部署大模型、复古硬件维修"
-          },
-          "tags_neg": {
-            "type": "text",
-            "description": "不要的标签：一行一个（可空）",
-            "default": "",
-            "hint": "例如 二手交易、砍价、开箱晒单"
           }
-        }
+        },
+        "display_item": "gid"
       }
     }
   },
   "platform_id": {
     "type": "string",
-    "description": "默认读取账号：某个群没填 platform 时用它（发送走下面的推送会话）",
+    "description": "默认读取账号：某个群没填 platform 时用它读历史（不会静默这个账号）",
     "default": ""
   },
   "days": {
     "type": "float",
-    "description": "手动/对话触发时，第一次（还没有上次记录）回溯多少天",
+    "description": "首次回溯天数：只在还没有上次记录时用，实际能拿到多少还受本地留存和历史接口限制",
     "default": 1.0
   },
   "max_messages": {
     "type": "int",
-    "description": "单个群单次最多处理多少条消息",
+    "description": "单个群单次最多处理多少条消息（超出会被截断，报告里仍按实际条数标）",
     "default": 10000
   },
   "use_local_store": {
@@ -66,13 +68,13 @@
   },
   "include_images": {
     "type": "bool",
-    "description": "保存群里的图片并挑进报告",
+    "description": "是否把群里的图片排进对应话题卡",
     "default": true
   },
   "max_images": {
     "type": "int",
-      "description": "每个话题最多放几张图",
-      "default": 4
+    "description": "每个话题最多放几张图（0 = 不配图）",
+    "default": 4
   },
   "max_image_mb": {
     "type": "int",
@@ -81,7 +83,7 @@
   },
   "keep_days": {
     "type": "int",
-    "description": "本地消息与图片保留多少天",
+    "description": "数据保留天数：超过就自动删本地消息、图片和报告",
     "default": 7,
     "hint": "超期的 messages/*.jsonl、images/日期目录、reports 里的旧图会被自动清掉"
   },
@@ -93,25 +95,26 @@
   },
   "owner_uids": {
     "type": "string",
-    "description": "允许调用日报工具的 QQ 号，逗号分隔",
+    "description": "谁可以要报告（必填）：填 QQ 号，多个用逗号隔开",
     "default": "",
-    "hint": "留空表示任何私聊都能触发；填了就只有这些号能用。群里无论怎么问都不会发报告"
+    "hint": "留空时任何人都不能生成或查看报告（fail-closed），只会收到一条「去配置」的提示。注意：这里管的是谁能主动查；自动推送到哪由下面的 delivery 决定"
   },
   "daily_time": {
     "type": "string",
-    "description": "每天自动生成的时间（HH:MM），每次总结过去 24 小时；留空则不定时",
-    "default": "23:00"
+    "description": "每天几点生成「最近 24 小时」报告（HH:MM，留空 = 不定时生成）",
+    "default": "23:00",
+    "hint": "只负责定时生成；发不发出去由「自动推送」开关决定。时间是本机时区，填 9:00 这种写法不会被识别，请写 09:00"
   },
   "push_enabled": {
     "type": "bool",
-    "description": "生成后自动私聊推送",
+    "description": "生成后是否自动推送到上面的会话",
     "default": false
   },
   "push_umo": {
     "type": "string",
-    "description": "推送目标会话 unified_msg_origin",
+    "description": "自动推送到哪个私聊会话（形如 平台id:FriendMessage:QQ号）",
     "default": "",
-    "hint": "格式 <平台id>:FriendMessage:<QQ号>，例如 mybot:FriendMessage:10001"
+    "hint": "只接受私聊会话；填成群聊或格式不对会被拒绝并在日志里报错。它不决定谁能主动查报告，那是 owner_uids 的事"
   },
   "report_title": {
     "type": "string",
@@ -120,7 +123,7 @@
   },
   "render_ppi": {
     "type": "int",
-    "description": "出图清晰度（ppi，越大越清晰也越大）",
+    "description": "出图清晰度（ppi）：数值越大图越清晰、文件越大",
     "default": 180
   },
   "ignore_uids": {
@@ -130,7 +133,8 @@
   },
   "silence_platforms": {
     "type": "string",
-    "description": "静默平台：这些平台实例永不回复任何消息，逗号分隔；留空则静默 platform_id",
-    "default": ""
+    "description": "要静音的账号（一般不用填）：这些账号在任何群、任何私聊都不开口",
+    "default": "",
+    "hint": "留空 = 不静音任何账号（读历史账号不会自动静音）。填了会让这个账号对**所有**插件都闭嘴，包括别的插件的回复，确认清楚再填"
   }
 }

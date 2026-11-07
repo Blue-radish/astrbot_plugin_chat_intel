@@ -25,7 +25,7 @@ def test_status_line_shows_collect_platform_and_warns_missing_want():
     p, _ = make_plugin()
     chat = ChatInterest("1", "bot_b", ("复古硬件",), (), "", "")
     line = p._chat_status_line(chat, "古董群", 12, 3, "11-07 23:00")
-    assert "采集 bot_b" in line
+    assert "读历史用 bot_b" in line
     assert "12 条" in line
     assert "带图 3 条" in line
 

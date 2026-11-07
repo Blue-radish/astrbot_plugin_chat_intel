@@ -13,10 +13,12 @@ import asyncio
 import hashlib
 import io
 import json
+import os
 import re
 import shutil
 import tempfile
 import time
+from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -66,6 +68,13 @@ except Exception:  # pragma: no cover - 没装就退化成原文匹配
     _zh_convert = None
 
 # 报告里各板块的条数上限（合并多个分片后仍要克制）
+# 历史分页最多翻多少页（防止极端情况下一直翻）
+MAX_HISTORY_PAGES = 300
+# 排队上限：正在生成时最多再排两份（交互 + 定时），再多就明说跑了
+QUEUE_MAX = 2
+# 单段总结失败重试次数（含首次）
+CHUNK_RETRY = 2
+
 # 每个话题最多问几张图（问得越多越贵，缓存会挡住重复判定）
 PER_TOPIC_ASK = 6
 # 一次生成最多问几张图（跨话题总量，第一次跑没有缓存时的花费上限）
@@ -122,46 +131,29 @@ TECH_HINTS = (
 
 SYSTEM_PROMPT = """你在给群友写一份私人情报简报。文字克制、具体、可执行。"""
 
-@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递", "2.2.0")
+@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递", "2.2.1")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
         self.config = config or {}
 
         self.chats: list[ChatInterest] = []
-        self._pending: tuple | None = None
+        self._queue: deque = deque(maxlen=QUEUE_MAX)
         self.group_ids: list[str] = []
         self.group_name_map: dict[str, str] = {}
-        try:
-            self.days = float(self.config.get("days") or 1.0)
-        except (TypeError, ValueError):
-            self.days = 1.0
-        try:
-            self.max_messages = max(50, int(self.config.get("max_messages") or 10000))
-        except (TypeError, ValueError):
-            self.max_messages = 10000
+        self.days = self._num_cfg("days", 1.0, lo=0.0, as_float=True)
+        self.max_messages = self._num_cfg("max_messages", 10000, lo=50)
         self.daily_time = str(self.config.get("daily_time") or "").strip()
         self.push_enabled = self._as_bool(self.config.get("push_enabled"), False)
         self.push_umo = str(self.config.get("push_umo") or "").strip()
         self.report_title = str(self.config.get("report_title") or "群聊情报").strip()
-        try:
-            self.ppi = max(72, int(self.config.get("render_ppi") or 180))
-        except (TypeError, ValueError):
-            self.ppi = 180
+        self.ppi = self._num_cfg("render_ppi", 180, lo=72)
 
         self.include_images = self._as_bool(self.config.get("include_images"), True)
-        try:
-            self.max_images = max(0, int(self.config.get("max_images") or 6))
-        except (TypeError, ValueError):
-            self.max_images = 6
-        try:
-            self.max_image_mb = max(1, int(self.config.get("max_image_mb") or 8))
-        except (TypeError, ValueError):
-            self.max_image_mb = 8
-        try:
-            self.keep_days = max(1, int(self.config.get("keep_days") or 7))
-        except (TypeError, ValueError):
-            self.keep_days = 7
+        # 0 是合法值（= 不配图），不能当成缺省
+        self.max_images = self._num_cfg("max_images", 4, lo=0)
+        self.max_image_mb = self._num_cfg("max_image_mb", 8, lo=1)
+        self.keep_days = self._num_cfg("keep_days", 7, lo=1)
         self.smart_parse = self._as_bool(self.config.get("smart_parse"), True)
 
         owners = str(self.config.get("owner_uids") or "")
@@ -170,13 +162,8 @@ class TechDigestPlugin(Star):
         ignore = str(self.config.get("ignore_uids") or "")
         self.ignore_uids = {u.strip() for u in ignore.split(",") if u.strip()}
 
-        silence = self.config.get("silence_platforms") or ""
-        if isinstance(silence, str):
-            silence = [x.strip() for x in silence.split(",") if x.strip()]
-        elif isinstance(silence, (list, tuple)):
-            silence = [str(x).strip() for x in silence if str(x).strip()]
-        self.platform_id = str(self.config.get("platform_id") or "").strip()
-        self.silence_platforms = silence or ([self.platform_id] if self.platform_id else [])
+        # 读历史用的账号 ≠ 要静音的账号：静默必须显式填，绝不隐式继承 platform_id
+        self.platform_id, self.silence_platforms = self._resolve_silence(self.config)
         # 必须在 platform_id 之后解析 chats：每群的 platform 缺省时要回退到它
         self._apply_chats(self.config.get("chats"))
         self._silenced = 0
@@ -219,8 +206,16 @@ class TechDigestPlugin(Star):
             logger.warning(
                 f"[{PLUGIN_NAME}] {self.font_dir} 里没有字体文件，中文可能显示为方框。"
             )
+        if self.platform_id and not self.silence_platforms:
+            logger.info(
+                f"[{PLUGIN_NAME}] {self.platform_id} 只作为「读历史」的账号，不会静音它；"
+                "要静音请在 silence_platforms 里显式填"
+            )
         if not self.group_ids:
-            logger.warning(f"[{PLUGIN_NAME}] 还没配置 chats（群），生成前请先在设置里加群")
+            logger.warning(
+                f"[{PLUGIN_NAME}] 还没配置要总结的群（chats），现在是待配置状态；"
+                "到设置页「要总结的群」里加一行（群号 + 关心的标签）就能用"
+            )
         else:
             no_want = [c.gid for c in self.chats if not c.tags_pos]
             if no_want:
@@ -229,6 +224,56 @@ class TechDigestPlugin(Star):
                 )
 
     # ------------------------------------------------------------------ 配置解析
+    def _num_cfg(self, key: str, default, lo=None, hi=None, as_float: bool = False):
+        """读数字配置：只有缺失/空串/类型不对才用默认值。
+
+        注意 0 是合法值（例如 max_images=0 表示不配图），不能用 `or default` 吞掉。
+        """
+        raw = self.config.get(key)
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            return default
+        try:
+            value = float(raw) if as_float else int(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                f"[{PLUGIN_NAME}] 配置 {key}={raw!r} 不是数字，按默认值 {default} 处理"
+            )
+            return default
+        if lo is not None and value < lo:
+            logger.warning(f"[{PLUGIN_NAME}] 配置 {key}={value} 超出范围，按 {lo} 处理")
+            value = lo
+        if hi is not None and value > hi:
+            logger.warning(f"[{PLUGIN_NAME}] 配置 {key}={value} 超出范围，按 {hi} 处理")
+            value = hi
+        return float(value) if as_float else int(value)
+
+    @staticmethod
+    def _resolve_silence(config: dict) -> tuple[str, list[str]]:
+        """解析「读历史账号」和「静默名单」：两者互不联动，静默必须显式配置。"""
+        config = config or {}
+        platform = str(config.get("platform_id") or "").strip()
+        raw = config.get("silence_platforms") or ""
+        if isinstance(raw, str):
+            items = [x.strip() for x in raw.split(",") if x.strip()]
+        elif isinstance(raw, (list, tuple)):
+            items = [str(x).strip() for x in raw if str(x).strip()]
+        else:
+            items = []
+        return platform, items
+
+    def _parse_group_ids(self) -> list[str]:
+        """兼容老配置里的 group_ids（字符串或列表），新配置走 chats。"""
+        raw = self.config.get("group_ids")
+        if raw is None:
+            return []
+        if isinstance(raw, str):
+            items = [x.strip() for x in re.split(r"[,，、\s]+", raw) if x.strip()]
+        elif isinstance(raw, (list, tuple)):
+            items = [str(x).strip() for x in raw if str(x).strip()]
+        else:
+            return []
+        return [gid for gid in items if gid.isdigit()]
+
     @staticmethod
     def _as_bool(value, default: bool) -> bool:
         if value is None:
@@ -247,12 +292,17 @@ class TechDigestPlugin(Star):
                 chats = [ChatInterest(gid=gid, platform=fallback) for gid in legacy]
                 logger.warning(
                     f"[{PLUGIN_NAME}] 检测到旧配置 group_ids={legacy}，已临时当作 chats 使用；"
-                    f"请在设置界面为每个群补上「想要的主题」"
+                    f"请在设置界面为每个群补上「关心的标签」"
                 )
         self.chats = chats
         self.group_ids = [c.gid for c in chats]
         if skipped:
             logger.warning(f"[{PLUGIN_NAME}] 这些 chats 行没有群号，已跳过：{skipped}")
+        if not chats:
+            logger.info(
+                f"[{PLUGIN_NAME}] 还没有可用的群配置（chats 为空），处于待配置状态："
+                "添加群号与关心的标签后才会生成报告"
+            )
 
     def _chat(self, gid: str | None) -> ChatInterest | None:
         if not gid:
@@ -268,7 +318,7 @@ class TechDigestPlugin(Star):
     ) -> str:
         """状态里每个群一行：谁在采集、今天多少条、上次覆盖到哪。"""
         parts = [f"{name}（{chat.gid}）"]
-        parts.append(f"采集 {chat.platform or '未配置'}")
+        parts.append(f"读历史用 {chat.platform or '未配置'}")
         parts.append(f"今日 {count} 条 / 带图 {imgs} 条")
         parts.append(f"上次报告覆盖到 {last or '还没生成过'}")
         if chat.tags_pos:
@@ -287,12 +337,21 @@ class TechDigestPlugin(Star):
         return {"groups": {}}
 
     def _save_state(self) -> None:
+        """先写临时文件再原子替换：中途崩溃也不会把 state.json 写坏。"""
+        tmp = None
         try:
-            self.state_path.write_text(
+            tmp = self.state_path.with_name(self.state_path.name + ".tmp")
+            tmp.write_text(
                 json.dumps(self.state, ensure_ascii=False, indent=2), encoding="utf-8"
             )
+            os.replace(tmp, self.state_path)
         except Exception as e:
             logger.warning(f"[{PLUGIN_NAME}] state.json 写入失败: {e}")
+            if tmp is not None:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
     def _group_state(self, gid: str) -> dict:
         return self.state.setdefault("groups", {}).setdefault(gid, {})
@@ -405,6 +464,7 @@ class TechDigestPlugin(Star):
         for gid in self.group_ids:
             await self._group_name(gid)  # 预热群名，否则按名字匹配不到群
         rng, gid, rest = self._resolve_request(text)
+        unknown_group = ""
         if rest and self.smart_parse and len(rest) >= 2:
             hint = await self._llm_parse_args(rest)
             if hint:
@@ -415,36 +475,108 @@ class TechDigestPlugin(Star):
                         rng = better
                 if group_hint and not gid:
                     gid, _ = self._match_group(group_hint)
+                    if not gid:
+                        unknown_group = group_hint  # 模型听出了群名，但配置里没有这个群
         since, until, label, incremental = rng
         if intent.kind == "rerun":
             incremental = False  # 重跑：忽略增量位，按范围重来
+        if not gid and not unknown_group and rest:
+            core = self._clean_text(rest)
+            if self._looks_like_group(core):
+                unknown_group = core
+        if unknown_group:
+            # 用户点名了某个群却对不上：不要退回「全部群」，那是白烧 token
+            await self._send_text(
+                umo,
+                f"没找到「{unknown_group}」这个群，这次就不生成了。\n"
+                f"现在配好的群：{await self._known_groups_text()}",
+            )
+            return
         logger.info(
             f"[{PLUGIN_NAME}] 直通 {intent.kind}：范围={label} 增量={incremental} "
             f"群={gid or '全部'} 命中「{intent.anchor}+{intent.action}」原文「{text}」"
         )
         if self._running:
-            self._pending = (umo, since, until, label, incremental, gid, True)
-            await self._send_text(umo, "上一份还在生成，这份先排队，跑完接着来。")
+            if self._enqueue(("digest", umo, since, until, label, incremental, gid, True)):
+                await self._send_text(umo, "上一份还在生成，这份先排队，跑完接着来。")
+            else:
+                await self._send_text(umo, f"已经在跑一份、后面还排着 {QUEUE_MAX} 份了，等它们跑完再叫我。")
             return
         await self._generate_and_send(
             umo, since, until, label, incremental, gid, announce=True
         )
 
+    def _enqueue(self, request: tuple) -> bool:
+        """入队一份待跑的请求；队列满返回 False，调用方据此明确告知用户。"""
+        if len(self._queue) >= (self._queue.maxlen or 1):
+            return False
+        self._queue.append(request)
+        return True
+
     async def _drain_pending(self) -> None:
-        """把排队的那一份接着跑掉。"""
-        request = self._pending
-        if request is None:
+        """把排队的请求接着跑掉（先进先出，一次一份）。"""
+        if not self._queue:
             return
-        self._pending = None
+        request = self._queue.popleft()
         try:
-            await self._generate_and_send(*request)
+            if request and request[0] == "daily":
+                await self._run_daily_once()
+            else:
+                await self._generate_and_send(*request[1:])
         except Exception as e:
             logger.error(f"[{PLUGIN_NAME}] 排队的那份生成失败: {e}", exc_info=True)
+
+    async def _known_groups_text(self) -> str:
+        """现在配了哪些群，用来在「找不到这个群」时回答用户。"""
+        if not self.group_ids:
+            return "（还没有配置任何群）"
+        parts = []
+        for gid in self.group_ids:
+            name = await self._group_name(gid)
+            parts.append(f"{name}（{gid}）" if name and name != gid else gid)
+        return "、".join(parts)
+
+    @staticmethod
+    def _looks_like_group(text: str) -> bool:
+        """剩下的碎片像不像在点名一个群。
+
+        只认高置信度信号：英文/数字 ≥3 位（群号、MeowShelter 这类），或 ≥4 个连续汉字。
+        门槛刻意抬高一档——把「情报跑」这种残留误判成群名，会让人正常问一句都生成不了。
+        中文群名写错字的情况交给下面的模型解析把关。
+        """
+        if not text:
+            return False
+        if re.search(r"[A-Za-z0-9_\-]{3,}", text):
+            return True
+        return bool(re.search(r"[\u4e00-\u9fff]{4,}", text))
+
+    async def _hint_no_owner(self, event: AstrMessageEvent, umo: str) -> None:
+        """没配 owner 时提示一次怎么配（一小时最多一次，避免刷屏）。"""
+        now = int(time.time())
+        if now - int(self.state.get("owner_hint_ts") or 0) < 3600:
+            return
+        self.state["owner_hint_ts"] = now
+        self._save_state()
+        await self._send_text(
+            umo,
+            "这个插件还没配置「谁可以拉报告」（owner_uids），现在谁私聊都不会生成。\n"
+            "去 WebUI → 插件管理 → 群聊情报 → 访问权限 → owner_uids 填上你自己的 QQ 号，保存后再叫我。",
+        )
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=900)
     async def intercept_digest_intent(self, event: AstrMessageEvent):
         """私聊里用大白话要报告时直接出图，不赌模型会不会调工具。"""
         if not self._tool_allowed(event):
+            # 只对「在要报告」的人说清楚原因，别把闲聊也打断
+            text = (event.message_str or "").strip()
+            if text and not text.startswith(("/", "／", "#")):
+                intent = detect_intent(text)
+                if self._should_act(text, intent) and not self.owner_uids:
+                    event.stop_event()
+                    try:
+                        await self._hint_no_owner(event, event.unified_msg_origin)
+                    except Exception as e:
+                        logger.warning(f"[{PLUGIN_NAME}] 权限提示发送失败: {e}")
             return
         text = (event.message_str or "").strip()
         if not text or text.startswith(("/", "／", "#")):
@@ -663,8 +795,12 @@ class TechDigestPlugin(Star):
 
     @staticmethod
     def _dedupe_records(records: list[dict]) -> list[dict]:
-        """同一条消息被两个 bot 各收一次时只留一条（与平台无关）。"""
-        seen: set[tuple] = set()
+        """同一条消息被两个 bot 各收一次时只留一条（与平台无关）。
+
+        同一人同一秒发了文字相同的两条不同图片时也会撞键，所以遇到重复要把图片并起来，
+        不能整条丢掉。
+        """
+        index: dict[tuple, dict] = {}
         out: list[dict] = []
         for rec in records:
             key = (
@@ -672,10 +808,15 @@ class TechDigestPlugin(Star):
                 int(rec.get("t") or 0),
                 str(rec.get("text") or "")[:40],
             )
-            if key in seen:
+            kept = index.get(key)
+            if kept is None:
+                index[key] = rec
+                out.append(rec)
                 continue
-            seen.add(key)
-            out.append(rec)
+            imgs = kept.setdefault("imgs", [])
+            for rel in rec.get("imgs") or []:
+                if rel not in imgs:
+                    imgs.append(rel)
         return out
 
     # ------------------------------------------------------------------ 拉历史
@@ -688,7 +829,9 @@ class TechDigestPlugin(Star):
         collected: list[dict] = []
         seen: set[str] = set()
         anchor = None
-        while len(collected) < self.max_messages:
+        pages = 0
+        while len(collected) < self.max_messages and pages < MAX_HISTORY_PAGES:
+            pages += 1
             params = {"group_id": int(gid), "count": 200}
             if anchor is not None:
                 params["message_seq"] = anchor
@@ -713,7 +856,9 @@ class TechDigestPlugin(Star):
             oldest_msg = min(batch, key=lambda m: int(m.get("time") or 0))
             oldest = int(oldest_msg.get("time") or 0)
             next_anchor = oldest_msg.get("message_seq") or oldest_msg.get("message_id")
-            if oldest < since or next_anchor is None or added == 0:
+            # 只根据「翻到比起始时间更早」和「翻不动了」结束；
+            # 这一页没有落在目标范围内的消息并不代表再往前也没有（要的时间段可能更早）
+            if oldest < since or next_anchor is None:
                 break
             if anchor is not None and str(next_anchor) == str(anchor):
                 break
@@ -1087,15 +1232,29 @@ class TechDigestPlugin(Star):
             return None
         # 指令必须写在 user 消息里，且放在转录之后（这个 provider 只认最后一条 user）
         prompt = build_digest_prompt(chat, group_name, window, transcript)
-        try:
-            resp = await provider.text_chat(
-                prompt=prompt, system_prompt=SYSTEM_PROMPT, contexts=[]
+        for attempt in range(1, CHUNK_RETRY + 1):
+            try:
+                resp = await provider.text_chat(
+                    prompt=prompt, system_prompt=SYSTEM_PROMPT, contexts=[]
+                )
+                text = getattr(resp, "completion_text", "") or ""
+            except Exception as e:
+                logger.error(
+                    f"[{PLUGIN_NAME}] 调用模型失败（第 {attempt}/{CHUNK_RETRY} 次）: {e}",
+                    exc_info=(attempt == CHUNK_RETRY),
+                )
+                if attempt < CHUNK_RETRY:
+                    await asyncio.sleep(2)
+                continue
+            data = self._parse_json(text)
+            if data:
+                return data
+            logger.warning(
+                f"[{PLUGIN_NAME}] 这一段没拿到可用 JSON（第 {attempt}/{CHUNK_RETRY} 次）"
             )
-            text = getattr(resp, "completion_text", "") or ""
-        except Exception as e:
-            logger.error(f"[{PLUGIN_NAME}] 调用模型失败: {e}", exc_info=True)
-            return None
-        return self._parse_json(text)
+            if attempt < CHUNK_RETRY:
+                await asyncio.sleep(2)
+        return None
 
     @staticmethod
     def _parse_json(text: str) -> dict | None:
@@ -1203,16 +1362,19 @@ class TechDigestPlugin(Star):
         key = f"warned_tags_{gid}"
         if self.state.get(key):
             return
-        self.state[key] = int(time.time())
-        self._save_state()
         text = (
             f"⚠ {group_name} 还没配置「关心的标签」，这次跳过了。\n"
             f"在插件设置 → 要总结的群 → 这个群的「关心的标签」里填几个词（比如 电脑、动漫、科研）就行。"
         )
         try:
-            await self._push_text(text)
+            sent = await self._push_text(text)
         except Exception as e:
             logger.warning(f"[{PLUGIN_NAME}] 告警发送失败: {e}")
+            return
+        if sent is False:  # 明确没发出去就别记账，下次还提醒
+            return
+        self.state[key] = int(time.time())
+        self._save_state()
 
     @staticmethod
     def _image_dims(path: Path) -> tuple[int, int]:
@@ -1643,15 +1805,24 @@ class TechDigestPlugin(Star):
 
         chunks = self._split_chunks(transcript)
         parts: list[dict] = []
+        failed: list[int] = []
         for i, chunk in enumerate(chunks, 1):
             window = label if len(chunks) == 1 else f"{label}（第 {i}/{len(chunks)} 段）"
             part = await self._extract_chunk(chat, group_name, window, chunk)
             if part:
                 parts.append(part)
+            else:
+                failed.append(i)
             if len(chunks) > 1:
                 await asyncio.sleep(0.5)
         if not parts:
             return None, f"{group_name}：模型没有给出可用的结构化结果", True
+        incomplete = bool(failed)
+        if incomplete:
+            logger.warning(
+                f"[{PLUGIN_NAME}] {group_name}：第 {'、'.join(map(str, failed))}/{len(chunks)} 段生成失败，"
+                "本轮按不完整处理（不推进增量游标）"
+            )
 
         data = self._merge_parts(parts, chat)
 
@@ -1670,6 +1841,11 @@ class TechDigestPlugin(Star):
             "stats": {
                 "line": f"{len(records)} 条消息 · {len(topics)} 个话题 · {label}",
             },
+            "warn": (
+                f"⚠ 第 {'、'.join(map(str, failed))}/{len(chunks)} 段生成失败，本报告不完整"
+                if incomplete
+                else ""
+            ),
             "headline": str(data.get("headline") or "").strip(),
             "topics": self._payload_topics(topics, topic_images),
             "footer": f"生成于 {now:%Y-%m-%d %H:%M} · {PLUGIN_NAME} · 本报告不会发到群里",
@@ -1679,9 +1855,14 @@ class TechDigestPlugin(Star):
         if path is None:
             return None, f"{group_name}：排版成图失败，看日志", True
 
-        if incremental:
+        # 只有完整跑完才推进增量游标，否则漏掉的内容下一轮还能补回来
+        if incremental and not incomplete:
             self._group_state(gid)["last_ts"] = int(until)
         self._group_state(gid)["last_report"] = path.name
+        self._group_state(gid)["last_report_ts"] = int(now.timestamp())
+        self._group_state(gid)["last_range"] = label
+        if incomplete:
+            self._group_state(gid)["last_incomplete"] = int(now.timestamp())
         self._save_state()
 
         tag_desc = "、".join(
@@ -1691,6 +1872,7 @@ class TechDigestPlugin(Star):
             f"[{group_name}] {label}：{len(records)} 条 / {len(topics)} 个话题"
             f"（标签 {tag_desc}）· 图 {image_count}"
             + (f" · {len(chunks)} 段" if len(chunks) > 1 else "")
+            + f" · ⚠ 缺 {len(failed)} 段（不完整）" if incomplete else ""
         )
         logger.info(f"[{PLUGIN_NAME}] {info} -> {path.name}")
         self._prune_old_files()
@@ -1731,14 +1913,47 @@ class TechDigestPlugin(Star):
                 out.append(row)
         return out
 
+    # 私聊类消息类型白名单（各平台命名不同，统一按小写比对）
+    _PRIVATE_TYPES = ("friendmessage", "privatemessage", "friend", "private", "temp")
+
+    @staticmethod
+    def _parse_umo(umo: str) -> tuple[str, str, str] | None:
+        """把 unified_msg_origin 拆成 (平台实例, 消息类型, 目标)。格式不对返回 None。"""
+        parts = str(umo or "").split(":")
+        if len(parts) != 3:
+            return None
+        platform, mtype, target = (part.strip() for part in parts)
+        if not platform or not mtype or not target:
+            return None
+        return platform, mtype, target
+
     def _push_target_ok(self) -> bool:
-        """投递口必须存在、且**不是群**——「报告永不发回群里」不能只靠配置自觉。"""
+        """投递口必须是**格式正确的私聊会话**——「报告永不发回群里」不能只靠配置自觉。"""
         if not getattr(self, "push_enabled", False) or not getattr(self, "push_umo", ""):
             return False
-        if "GroupMessage" in self.push_umo:
+        parsed = self._parse_umo(self.push_umo)
+        if parsed is None:
+            logger.error(
+                f"[{PLUGIN_NAME}] push_umo 格式不对（{self.push_umo!r}），"
+                "应形如 平台id:FriendMessage:QQ号；拒绝发送"
+            )
+            return False
+        _platform, mtype, target = parsed
+        lowered = mtype.lower()
+        if "group" in lowered:
             logger.error(
                 f"[{PLUGIN_NAME}] push_umo 指向群聊（{self.push_umo}），拒绝发送："
                 "报告永不发回群里"
+            )
+            return False
+        if lowered not in self._PRIVATE_TYPES:
+            logger.error(
+                f"[{PLUGIN_NAME}] push_umo 的消息类型 {mtype} 不像私聊，拒绝发送：{self.push_umo}"
+            )
+            return False
+        if not target.isdigit():
+            logger.error(
+                f"[{PLUGIN_NAME}] push_umo 的收件人 {target!r} 不是数字 QQ 号，拒绝发送"
             )
             return False
         return True
@@ -1780,11 +1995,20 @@ class TechDigestPlugin(Star):
                     now = datetime.now()
                     today = now.strftime("%Y-%m-%d")
                     if now.strftime("%H:%M") == self.daily_time and self._last_run_date != today:
-                        self._last_run_date = today
                         logger.info(f"[{PLUGIN_NAME}] 定时任务触发 {self.daily_time}")
                         if self._running:
-                            logger.warning(f"[{PLUGIN_NAME}] 上一轮还没跑完，跳过本次定时")
+                            # 忙碌时排队，别把今天这一份直接丢掉
+                            if self._enqueue(("daily",)):
+                                self._last_run_date = today
+                                logger.warning(
+                                    f"[{PLUGIN_NAME}] 上一轮还没跑完，今天的定时已排队，等它结束接着跑"
+                                )
+                            else:
+                                logger.error(
+                                    f"[{PLUGIN_NAME}] 队列满了，今天的定时跳过（明天 0 点后重新计）"
+                                )
                         else:
+                            self._last_run_date = today
                             self._running = True
                             try:
                                 await self._run_daily_once()
@@ -1876,14 +2100,18 @@ class TechDigestPlugin(Star):
         return any(cue in text for cue in self._TOOL_CUES)
 
     def _tool_allowed(self, event: AstrMessageEvent) -> bool:
-        """只在私聊、且（配了的话）只允许主人调用。群里一律拒绝，避免把报告发到群里。"""
+        """只在私聊、且只有 owner_uids 里的人能用。群里一律拒绝，避免把报告发到群里。
+
+        owner_uids 为空时一律拒绝（fail-closed）：群聊内容不是公开内容，宁可不能用，
+        也不要默认让所有能私聊机器人的人都能拉报告。
+        """
         try:
             if event.get_group_id():
                 return False
         except Exception:
             return False
         if not self.owner_uids:
-            return True
+            return False
         try:
             return str(event.get_sender_id()) in self.owner_uids
         except Exception:
@@ -1914,8 +2142,11 @@ class TechDigestPlugin(Star):
                 await self._group_name(_gid)
             rng, gid, _rest = self._resolve_request(f"{when} {group}".strip())
             since, until, label, incremental = rng
-            self._pending = (event.unified_msg_origin, since, until, label, incremental, gid, True)
-            return "上一份还在生成，这份已经排队，跑完接着发。"
+            if self._enqueue(
+                ("digest", event.unified_msg_origin, since, until, label, incremental, gid, True)
+            ):
+                return "上一份还在生成，这份已经排队，跑完接着发。"
+            return "已经在跑一份、后面还排着队了，等它们跑完再叫我。"
         if not self.group_ids:
             return "插件还没配置要监控的群，先让主人在「要总结的群」里加一行。"
 
@@ -1935,6 +2166,12 @@ class TechDigestPlugin(Star):
         since, until, label, incremental = rng
         if again:
             incremental = False
+        if group.strip() and not gid:
+            # 模型给了一个群名却没匹配上：明说没有这个群，别默默改成「全部群」
+            return (
+                f"没有「{group}」这个群，这次不生成（免得白跑一遍浪费额度）。"
+                f"现在配好的群：{await self._known_groups_text()}"
+            )
 
         # 生成可能要好几分钟，先立刻回话，图由后台任务直接发到聊天里
         event.set_extra("chat_intel_tool_sent", True)
@@ -1981,14 +2218,20 @@ class TechDigestPlugin(Star):
                     f"上次报告覆盖到 {last}"
                 )
         lines.append(
-            f"平台 {self.platform_id or '未配置'} · 静默 {'、'.join(self.silence_platforms) or '无'}"
+            f"读历史账号 {self.platform_id or '未配置'} · 静默账号 "
+            f"{'、'.join(self.silence_platforms) or '无（不做静音）'}"
             f"（拦下事件 {self._silenced} / LLM {self._llm_blocked} / 回复 {self._result_blocked}）"
         )
         latest = self._latest_report()
         lines.append(f"最近报告：{latest.name if latest else '无'}")
+        push_state = (
+            f"开（{self.push_umo}）" if self.push_enabled and self.push_umo else "关"
+        )
+        if self.push_enabled and not self._push_target_ok():
+            push_state = f"⚠ 配置有问题（{self.push_umo or '目标为空'}），不会发送"
         lines.append(
-            f"定时 {self.daily_time or '关闭'} · 推送 {self.push_umo or '关闭'} · "
-            f"上限 {self.max_messages} 条 · 图片上限 {self.max_images} 张 · "
+            f"定时生成 {self.daily_time or '关闭'} · 自动推送 {push_state} · "
+            f"上限 {self.max_messages} 条 · 每个话题最多 {self.max_images} 张图 · "
             f"数据保留 {self.keep_days} 天"
         )
         return lines

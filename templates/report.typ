@@ -52,6 +52,12 @@
 #v(2pt)
 #linebreak()
 #text(size: 8pt, fill: faint, stats.at("line", default: ""))
+// 不完整提示：某一段总结失败时明确标出来，别让人以为看全了
+#let warn = d.at("warn", default: "")
+#if warn != "" [
+  #v(3pt)
+  #text(size: 8pt, fill: rgb("#b45309"), warn)
+]
 #v(6pt)
 #line(length: 100%, stroke: 0.8pt + hair)
 
