@@ -132,6 +132,31 @@ def build_digest_prompt(chat: ChatInterest, group_name: str, window: str, transc
     return head + tail
 
 
+_VISION_SCHEMA = """{"keep": true 或 false, "kind": "截图/电路图/设备照/表情包/照片/聊天截图 等不超过 6 字", "text": "图里的关键文字，最多 24 字，没有就空字符串"}"""
+
+
+def build_vision_prompt(chat: ChatInterest, group_name: str, prev: str, cur: str, nxt: str) -> str:
+    """判图用的 user 消息：先给上下文，再给这个群的兴趣点，最后要 JSON。"""
+    want_block = _numbered(chat.want) if chat.want else "（未配置：按「有信息量、能看懂内容」的尺度判断）"
+    not_want_block = _numbered(chat.not_want) if chat.not_want else "（无）"
+    return (
+        f"这是群「{group_name}」里的一张图，发送时前后文如下。\n\n"
+        f"上文：{prev or '（无）'}\n"
+        f"本条文字：{cur or '（无文字，纯图片）'}\n"
+        f"下文：{nxt or '（无）'}\n\n"
+        "———— 以下是要你做的事 ————\n\n"
+        f"看图，判断这张图是否与这个群想要的主题有关。\n\n"
+        f"这个群想要的主题：\n{want_block}\n\n"
+        f"这个群不要的主题：\n{not_want_block}\n\n"
+        "判断标准：\n"
+        "1. 留下能提供信息的图：报错/代码/终端截图、电路图、原理图、器件或设备照片、"
+        "数据图表、网页截图、说明书扫描件。\n"
+        "2. 表情包、纯人像自拍、宠物、吃喝、风景、无信息量的糊图，一律不留。\n"
+        "3. 看不清内容、拿不准的时候留 false。\n\n"
+        f"只输出 JSON 本体，不要代码块：\n{_VISION_SCHEMA}"
+    )
+
+
 def group_sections(chat: ChatInterest, items: list[dict]) -> tuple[list[tuple[str, list[dict]]], int]:
     """按 want 顺序分节；空节不出现；归不进去的进「其他」；返回 (节, 截断数)。"""
     buckets: dict[str, list[dict]] = {text: [] for text in chat.want}

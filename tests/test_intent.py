@@ -30,5 +30,16 @@ def test_rerun_and_resend():
     assert detect_intent("群聊情报把上一份再发我").kind == "resend"
 
 
+def test_digest_natural_phrasings():
+    """"跑一份""来一份""出一份"都是要报告，不是别的功能。"""
+    for text in (
+        "群聊情报把今天的MeowShelter跑一份",
+        "群聊情报来一份今天的",
+        "情报系统出一份昨天的",
+    ):
+        got = detect_intent(text)
+        assert got is not None and got.kind == "digest", text
+
+
 def test_unrelated_text():
     assert detect_intent("今天天气怎么样") is None

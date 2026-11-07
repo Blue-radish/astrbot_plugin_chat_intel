@@ -33,10 +33,24 @@ PLUGIN_NAME = "astrbot_plugin_chat_intel"
 
 try:  # 插件以包形式被 AstrBot 加载时走相对导入
     from .intent import detect_intent
-    from .interest import ChatInterest, build_digest_prompt, group_sections, parse_chats
+    from .interest import (
+        ChatInterest,
+        build_digest_prompt,
+        build_vision_prompt,
+        group_sections,
+        interest_fingerprint,
+        parse_chats,
+    )
 except ImportError:  # pragma: no cover - 单测按文件路径加载模块
     from intent import detect_intent
-    from interest import ChatInterest, build_digest_prompt, group_sections, parse_chats
+    from interest import (
+        ChatInterest,
+        build_digest_prompt,
+        build_vision_prompt,
+        group_sections,
+        interest_fingerprint,
+        parse_chats,
+    )
 
 try:  # 简繁归一化：群名可能是繁体，用户打的是简体
     from zhconv import convert as _zh_convert
@@ -50,7 +64,7 @@ CAP_JOBS = 8
 CAP_AI_NEWS = 6
 CAP_QUOTES = 4
 
-IMG_CACHE_VERSION = 3  # 判据说辞变化时 +1，旧缓存作废
+IMG_CACHE_VERSION = 4  # 判据说辞/判据维度变化时 +1，旧缓存作废（4：判图改用每群兴趣）
 
 CHUNK_CHARS = 55000  # 单次喂给模型的转录上限，超了切片后合并
 
@@ -65,26 +79,7 @@ group 写群名里最有辨识度的一小段（例如"考古"），没提到群
 
 用户的话：{text}"""
 
-VISION_PROMPT = """这是群聊里出现的一张图片。判断它作为「技术情报」的配图有没有保留价值。
 
-值得留（keep=true）：
-- 报错窗口、异常堆栈、编译或运行失败提示
-- 代码、终端、日志、命令行输出
-- 架构图、流程图、电路或硬件图纸、协议时序图
-- 技术类数据图表、性能曲线、监控面板（接口耗时、压测、资源占用这类）
-- 论文、文档、规范、接口说明的截图
-- 招聘或职位信息、JD、薪资与面试相关截图
-- 群聊或论坛里关于技术、行业、就业话题的讨论截图（例如硬件行情、模型发布、公司动向、裁员或招聘）
-
-不该留（keep=false）：
-- 表情包、梗图、二次元或动漫图、摄影照片、自拍、游戏画面、纯风景
-- 没有可读信息的截图
-- 生活类 App 界面：睡眠、健康、运动、天气、购物、外卖、记账
-- 个人社交动态：朋友圈、微博、小红书里的晒图或情绪帖
-
-遇到模棱两可的，按「读者是学计算机、写代码、找工作的人，这图对他有没有信息价值」来判断，没有就 false。
-
-只输出 JSON：{"keep": true 或 false, "kind": "报错截图/代码/终端/图表/文档/招聘/讨论截图/电路图纸/表情包/照片/动漫/游戏/生活界面/社交动态/其他", "text": "图里能看清的文字，摘录不超过 24 字，看不清就给空字符串"}"""
 
 IMAGE_PICK_PROMPT = """下面是群聊里出现过的候选图片，每行给出：编号、发送者、时间、这条消息的文字、上下文。
 
@@ -1208,10 +1203,8 @@ class TechDigestPlugin(Star):
         # 本条没字，但前后在聊技术：只留很大的图（截图、图表通常很大）
         return any(hint in ctx for hint in TECH_HINTS) and max(width, height) >= 800
 
-    async def _select_images(
-        self, records: list[dict], topic_people: set[str]
-    ) -> list[dict]:
-        """有视觉模型就让它看图判类型；没有才退回尺寸/文字规则。"""
+    async def _select_images(self, records: list[dict], chat: ChatInterest) -> list[dict]:
+        """有视觉模型就让它按这个群的兴趣看图；没有才退回尺寸/文字规则。"""
         if not self.include_images or self.max_images <= 0:
             return []
         candidates = self._image_candidates(records)
@@ -1219,9 +1212,9 @@ class TechDigestPlugin(Star):
             return []
         provider = self._get_vision_provider()
         if provider is not None:
-            kept = await self._vision_picks(provider, candidates)
+            kept = await self._vision_picks(provider, candidates, chat)
         else:
-            kept = await self._rule_picks(candidates, topic_people)
+            kept = await self._rule_picks(candidates, chat)
         if not kept:
             return []
         kept.sort(key=lambda c: int(c["rec"].get("t") or 0))
@@ -1249,26 +1242,33 @@ class TechDigestPlugin(Star):
             )
         return candidates[-20:]  # 太多图就别全问了，取最近的 20 条
 
-    async def _vision_picks(
-        self, provider, candidates: list[dict]
-    ) -> list[dict]:
-        """并发送图给视觉模型判断，只留技术相关的截图。结果会缓存到 state.json。"""
+    def _image_cache_key(self, chat: ChatInterest, path: Path) -> str:
+        """判图缓存键：兴趣指纹 + 文件名。换群或改了兴趣就重新判。"""
+        return f"{interest_fingerprint(chat)}:{path.name}"
+
+    def _reset_image_cache_if_stale(self) -> None:
         if self.state.get("images_version") != IMG_CACHE_VERSION:
             self.state["images"] = {}
             self.state["images_version"] = IMG_CACHE_VERSION
+
+    async def _vision_picks(
+        self, provider, candidates: list[dict], chat: ChatInterest
+    ) -> list[dict]:
+        """并发送图给视觉模型，按这个群的兴趣留图；结论按兴趣指纹缓存。"""
+        self._reset_image_cache_if_stale()
         cache = self.state.setdefault("images", {})
         semaphore = asyncio.Semaphore(3)
         results: dict[str, dict] = {}
 
         async def judge(cand: dict) -> None:
             path = cand["files"][0]
-            key = path.name
+            key = self._image_cache_key(chat, path)
             cached = cache.get(key)
             if isinstance(cached, dict) and "keep" in cached:
                 results[key] = cached
                 return
             async with semaphore:
-                verdict = await self._classify_image(provider, path)
+                verdict = await self._classify_image(provider, path, cand, chat)
             if verdict is None:
                 return
             results[key] = verdict
@@ -1279,7 +1279,7 @@ class TechDigestPlugin(Star):
         kept: list[dict] = []
         dropped: list[str] = []
         for cand in candidates:
-            verdict = results.get(cand["files"][0].name)
+            verdict = results.get(self._image_cache_key(chat, cand["files"][0]))
             if verdict and verdict.get("keep"):
                 cand["kind"] = verdict.get("kind") or ""
                 cand["ocr"] = verdict.get("text") or ""
@@ -1287,14 +1287,14 @@ class TechDigestPlugin(Star):
             else:
                 dropped.append(f"{cand['files'][0].name}:{(verdict or {}).get('kind', '?')}")
         logger.info(
-            f"[{PLUGIN_NAME}] 视觉判定 {len(candidates)} 张候选：留 {len(kept)} 张"
-            f"，丢弃 {len(candidates) - len(kept)} 张（其中 {len(results)} 张有判定）"
+            f"[{PLUGIN_NAME}] 视觉判定（兴趣 {interest_fingerprint(chat)}）{len(candidates)} 张候选："
+            f"留 {len(kept)} 张，丢弃 {len(candidates) - len(kept)} 张（其中 {len(results)} 张有判定）"
         )
         if dropped and len(dropped) <= 8:
             logger.info(f"[{PLUGIN_NAME}] 丢弃明细: {'; '.join(dropped)}")
         return kept[-self.max_images :]
 
-    async def _rule_picks(self, candidates: list[dict], topic_people: set[str]) -> list[dict]:
+    async def _rule_picks(self, candidates: list[dict], chat: ChatInterest) -> list[dict]:
         """没有视觉模型时的退路：尺寸/形状 + 文字线索，再让模型看上下文做减法。"""
         filtered = []
         for cand in candidates:
@@ -1306,9 +1306,9 @@ class TechDigestPlugin(Star):
         if not filtered:
             return []
         filtered = filtered[-12:]
-        picks = await self._ask_which_images(filtered)
+        picks = await self._ask_which_images(filtered, chat)
         if picks is None:
-            picks = self._heuristic_image_picks(filtered, topic_people)
+            picks = self._heuristic_image_picks(filtered, chat)
         out = []
         for i in picks:
             if 0 <= i < len(filtered):
@@ -1328,10 +1328,20 @@ class TechDigestPlugin(Star):
             caption += f" · {kind}"
         return {"path": str(cand["files"][0]), "caption": caption}
 
-    async def _classify_image(self, provider, path: Path) -> dict | None:
+    async def _classify_image(
+        self, provider, path: Path, cand: dict | None = None, chat: ChatInterest | None = None
+    ) -> dict | None:
+        cand = cand or {"prev": "", "rec": {}, "next": ""}
+        chat = chat or ChatInterest("", "", ())
         try:
             resp = await provider.text_chat(
-                prompt=VISION_PROMPT,
+                prompt=build_vision_prompt(
+                    chat,
+                    self.group_name_map.get(chat.gid) or chat.name or "这个群",
+                    str(cand.get("prev") or ""),
+                    str((cand.get("rec") or {}).get("text") or ""),
+                    str(cand.get("next") or ""),
+                ),
                 image_urls=[str(path)],
                 contexts=[],
                 system_prompt="你只判断图片类型，判断克制，宁严勿松。",
@@ -1364,13 +1374,13 @@ class TechDigestPlugin(Star):
         cfg = getattr(provider, "provider_config", None)
         modalities = cfg.get("modalities") if isinstance(cfg, dict) else None
         if isinstance(modalities, list) and "image" not in modalities:
-            logger.info(
-                f"[{PLUGIN_NAME}] 当前模型不支持图片输入，图片退回规则筛选"
-            )
+            logger.info(f"[{PLUGIN_NAME}] 当前模型不支持图片输入，图片退回规则筛选")
             return None
         return provider
 
-    async def _ask_which_images(self, candidates: list[dict]) -> list[int] | None:
+    async def _ask_which_images(
+        self, candidates: list[dict], chat: ChatInterest | None = None
+    ) -> list[int] | None:
         provider = self._get_provider()
         if provider is None:
             return None
@@ -1384,13 +1394,14 @@ class TechDigestPlugin(Star):
                 f"本条={str(rec.get('text') or '(无文字)')[:80]} "
                 f"上文={cand['prev'][-60:] or '(无)'} 下文={cand['next'][:60] or '(无)'}"
             )
+        want_txt = "、".join(chat.want) if chat and chat.want else "技术相关内容"
         prompt = IMAGE_PICK_PROMPT.format(
             limit=self.max_images, items="\n".join(lines)
-        )
+        ) + f"\n\n这个群想要的主题：{want_txt}。只挑与这些主题有关的图。"
         try:
             resp = await provider.text_chat(
                 prompt=prompt,
-                system_prompt="你只关心技术内容，判断克制，不确定就不留。",
+                system_prompt="你只关心上面列出的主题，判断克制，不确定就不留。",
                 contexts=[],
             )
             text = getattr(resp, "completion_text", "") or ""
@@ -1412,9 +1423,10 @@ class TechDigestPlugin(Star):
 
     @staticmethod
     def _heuristic_image_picks(
-        candidates: list[dict], topic_people: set[str]
+        candidates: list[dict], chat: ChatInterest | None = None
     ) -> list[int]:
         scored: list[tuple[int, int]] = []
+        keywords = [w.lower() for w in (chat.keywords if chat else ()) if w]
         for i, cand in enumerate(candidates):
             rec = cand["rec"]
             text = (
@@ -1425,10 +1437,9 @@ class TechDigestPlugin(Star):
                 + str(cand["next"])
             ).lower()
             score = sum(1 for hint in TECH_HINTS if hint in text)
+            score += sum(1 for word in keywords if word in text)
             if score == 0:
                 continue
-            if str(rec.get("name") or "") in topic_people:
-                score += 2
             scored.append((score, i))
         scored.sort(key=lambda x: -x[0])
         return [i for _score, i in scored]
@@ -1538,7 +1549,7 @@ class TechDigestPlugin(Star):
         sections = data.get("sections") or []
         flat_items = [item for _title, bucket in sections for item in bucket]
 
-        images = await self._select_images(records, set())
+        images = await self._select_images(records, chat)
 
         now = datetime.now()
         payload = {
