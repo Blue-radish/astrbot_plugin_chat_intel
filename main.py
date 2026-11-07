@@ -41,6 +41,7 @@ try:  # 插件以包形式被 AstrBot 加载时走相对导入
         merge_topics,
         normalize_topics,
         parse_chats,
+        split_names,
         topic_members,
         topic_time_range,
     )
@@ -54,6 +55,7 @@ except ImportError:  # pragma: no cover - 单测按文件路径加载模块
         merge_topics,
         normalize_topics,
         parse_chats,
+        split_names,
         topic_members,
         topic_time_range,
     )
@@ -117,7 +119,7 @@ TECH_HINTS = (
 
 SYSTEM_PROMPT = """你在给群友写一份私人情报简报。文字克制、具体、可执行。"""
 
-@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递", "2.1.0")
+@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递", "2.1.1")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -1162,8 +1164,9 @@ class TechDigestPlugin(Star):
     def _payload_topics(topics: list[dict]) -> list[dict]:
         """交给模板的话题结构。
 
-        tags 必须保持成数组：模板按数组逐个渲染标签，一旦在 Python 侧拼成「甲、乙」字符串，
-        模板就会把它当字符串逐字拆开，渲染成一字一个标签块。
+        - tags 必须保持成数组：模板按数组逐个渲染标签，一旦在 Python 侧拼成「甲、乙」字符串，
+          模板就会把它当字符串逐字拆开，渲染成一字一个标签块。
+        - parts 是把正文按「昵称 / 非昵称」切好的小段，模板靠它把群友 ID 排成浅一点的色。
         """
         out: list[dict] = []
         for topic in topics:
@@ -1171,6 +1174,7 @@ class TechDigestPlugin(Star):
             if not title:
                 continue
             raw_tags = topic.get("tags") or []
+            summary = str(topic.get("summary") or "").strip()
             out.append(
                 {
                     "title": title,
@@ -1179,7 +1183,8 @@ class TechDigestPlugin(Star):
                     else [],
                     "time": str(topic.get("time") or ""),
                     "members": str(topic.get("members") or ""),
-                    "summary": str(topic.get("summary") or ""),
+                    "summary": summary,
+                    "parts": split_names(summary, topic.get("names") or []),
                     "count": int(topic.get("count") or 0),
                 }
             )
@@ -1192,13 +1197,19 @@ class TechDigestPlugin(Star):
         for topic in topics:
             nums = [n for n in topic.get("msg_nos") or [] if 0 <= n < len(records)]
             picked = [records[n] for n in nums]
+            names: list[str] = []
+            for rec in picked:
+                name = str(rec.get("name") or "").strip()
+                if name and name not in names:
+                    names.append(name)
             out.append(
                 {
                     "title": topic.get("title") or "",
                     "tags": topic.get("tags") or [],
                     "summary": topic.get("summary") or "",
                     "time": topic_time_range([int(r.get("t") or 0) for r in picked]),
-                    "members": topic_members([str(r.get("name") or "") for r in picked]),
+                    "members": topic_members(names),
+                    "names": names,  # 完整名单，正文高亮用（members 会给「等 N 人」截断）
                     "count": len(picked),
                 }
             )

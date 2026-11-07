@@ -91,3 +91,32 @@ def test_payload_topics_keeps_tags_as_list():
 def test_payload_topics_skips_rows_without_title():
     p, _ = make_plugin()
     assert p._payload_topics([{"title": "  ", "tags": ["x"]}]) == []
+
+
+def test_payload_topics_splits_nicknames_for_light_typesetting():
+    """正文里的昵称要单独切段，模板才排得出「浅一点的群友 ID」。"""
+    p, _ = make_plugin()
+    out = p._payload_topics(
+        [
+            {
+                "title": "本地跑大模型",
+                "tags": ["电脑"],
+                "summary": "摩顺卡 先提问，阿越 说 16G 不够。",
+                "names": ["摩顺卡", "阿越"],
+            }
+        ]
+    )
+    parts = out[0]["parts"]
+    assert [x["t"] for x in parts if x["n"]] == ["摩顺卡", "阿越"]
+    assert "".join(x["t"] for x in parts) == "摩顺卡 先提问，阿越 说 16G 不够。"
+
+
+def test_describe_topics_exposes_all_nicknames_for_highlighting():
+    """高亮要用完整名单，不能只给「等 N 人」截断后的那几个。"""
+    p, _ = make_plugin()
+    recs = [{"t": 100 + i, "name": f"人{i}", "text": "x"} for i in range(6)]
+    out = p._describe_topics(
+        [{"title": "t", "tags": [], "msg_nos": list(range(6)), "summary": "s"}], recs
+    )
+    assert out[0]["names"] == [f"人{i}" for i in range(6)]
+    assert "等 6 人" in out[0]["members"]

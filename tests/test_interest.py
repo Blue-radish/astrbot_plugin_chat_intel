@@ -6,6 +6,7 @@ from interest import (
     merge_topics,
     normalize_topics,
     parse_chats,
+    split_names,
     topic_members,
     topic_time_range,
 )
@@ -63,11 +64,12 @@ def test_prompt_puts_rules_after_transcript():
 
 
 def test_prompt_asks_for_complete_narrative():
-    """话题要讲完整：prompt 必须点明按事件分话题、大话题写长。"""
+    """话题要讲完整：prompt 必须点明按事件分话题、长话题写细。"""
     chat = ChatInterest("1", "p", ("复古硬件",), (), "", "")
     prompt = build_digest_prompt(chat, "古董群", "今天", "#1 甲: hi")
     assert "一个话题 = 群友围绕同一件事来回聊的一段" in prompt
-    assert "150-300 字" in prompt
+    assert "300-600 字" in prompt
+    assert "80-150 字" in prompt
 
 
 def test_vision_prompt_uses_tags():
@@ -133,3 +135,38 @@ def test_topic_members_caps_and_dedupes():
     assert topic_members(["阿越", "阿越", "", "摩顺卡"]) == "阿越、摩顺卡"
     assert topic_members(["a", "b", "c", "d", "e"]) == "a、b、c、d 等 5 人"
     assert topic_members([]) == ""
+
+
+def test_prompt_demands_rich_detail_and_real_nicknames():
+    """正文要贴着原文写、直接点名，不要「有群友提到」这种模糊说法。"""
+    chat = ChatInterest("1", "p", ("复古硬件",), (), "", "")
+    prompt = build_digest_prompt(chat, "古董群", "今天", "#1 甲: hi")
+    assert "300-600" in prompt
+    assert "有群友提到" in prompt  # 作为反例出现在规则里
+    assert "群友昵称" in prompt
+
+
+def test_split_names_marks_nicknames_inside_sentence():
+    """正文里出现的昵称要单独切出来，模板好把它排得浅一点。"""
+    parts = split_names("摩顺卡 先提问，阿越 回了句「16G 真不够」。", ["摩顺卡", "阿越"])
+    assert [(p["t"], p["n"]) for p in parts] == [
+        ("摩顺卡", True),
+        (" 先提问，", False),
+        ("阿越", True),
+        (" 回了句「16G 真不够」。", False),
+    ]
+
+
+def test_split_names_prefers_longest_and_ignores_one_char():
+    parts = split_names("阿越咪说天不错", ["阿越", "阿越咪", "天"])
+    assert [(p["t"], p["n"]) for p in parts] == [
+        ("阿越咪", True),
+        ("说天不错", False),  # 单字昵称不参与高亮，免得满屏都是
+    ]
+
+
+def test_split_names_without_match_is_one_plain_part():
+    assert split_names("没有任何昵称的句子", ["甲"]) == [
+        {"t": "没有任何昵称的句子", "n": False}
+    ]
+    assert split_names("", ["甲"]) == []

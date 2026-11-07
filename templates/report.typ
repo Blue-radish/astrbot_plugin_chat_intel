@@ -18,6 +18,13 @@
 #let c5 = rgb("#a03a5a")
 #let palette = (c1, c2, c3, c4, c5)
 
+// 标签：模仿 B 站视频页下面的那种圆角小框，只有一种中性色
+#let tag-fill = rgb("#f7f8fa")
+#let tag-line = rgb("#d5dae2")
+#let tag-ink = rgb("#61666d")
+// 正文里的群友 ID：比正文浅一档，跟描述文字分开
+#let name-ink = rgb("#7c8aa0")
+
 #let topics = d.at("topics", default: ())
 #let quotes = d.at("quotes", default: ())
 #let stats = d.at("stats", default: (:))
@@ -59,25 +66,25 @@
 ]
 
 // ============ 话题卡 ============
-#for (ti, t) in topics.enumerate() [
-  #let accent = palette.at(calc.min(ti, palette.len() - 1))
+#for t in topics [
   #block(width: 100%, fill: card, radius: 5pt, inset: (x: 11pt, y: 9pt), stroke: 0.5pt + hair, below: 8pt, above: 8pt)[
     // 标题
     #block(below: 0pt)[
       #text(size: 11pt, weight: "bold", t.at("title", default: ""))
     ]
-    // 标签
+    // 标签：B 站那种圆角小框，文字在框里居中，只有一种中性色，不搞彩色
     #if t.at("tags", default: ()).len() > 0 [
       #block(above: 6pt, below: 6pt)[
         #for tag in t.at("tags") [
           #box(
-            fill: accent,
+            fill: tag-fill,
+            stroke: 0.5pt + tag-line,
             radius: 3pt,
-            inset: (x: 5pt, y: 1pt),
-            height: 13pt,
-            text(size: 7.5pt, fill: white, tag)
+            inset: (x: 6pt, y: 1pt),
+            height: 14pt,
+            align(center + horizon, text(size: 8pt, fill: tag-ink, tag))
           )
-          #h(4pt)
+          #h(5pt)
         ]
       ]
     ]
@@ -90,8 +97,19 @@
         #text(size: 8pt, fill: faint, meta-parts.join("　·　"))
       ]
     ]
-    // 事件讲述
-    #if t.at("summary", default: "") != "" [
+    // 事件讲述：群友 ID 排成浅一点的色，跟描述文字分开
+    #let parts = t.at("parts", default: ())
+    #if parts.len() > 0 [
+      #block(above: 6pt, below: 0pt)[
+        #for p in parts [
+          #if p.at("n", default: false) [
+            #text(size: 9.5pt, fill: name-ink, p.at("t", default: ""))
+          ] else [
+            #text(size: 9.5pt, fill: body-ink, p.at("t", default: ""))
+          ]
+        ]
+      ]
+    ] else if t.at("summary", default: "") != "" [
       #block(above: 6pt, below: 0pt)[
         #text(size: 9.5pt, fill: body-ink, t.at("summary", default: ""))
       ]

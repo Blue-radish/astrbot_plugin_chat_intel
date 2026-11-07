@@ -6,6 +6,7 @@
 
 import argparse
 import json
+import sys
 import shutil
 import tempfile
 from datetime import datetime
@@ -15,6 +16,9 @@ import typst
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
+
+sys.path.insert(0, str(ROOT))
+from interest import split_names  # noqa: E402  与插件用同一套「群友 ID」切分
 TEMPLATE = ROOT / "templates" / "report.typ"
 LOGO = ROOT / "assets" / "logo.typ"
 
@@ -81,45 +85,49 @@ SCENE_FULL = {
     "topics": [
         {
             "title": "eslint 9 与 typescript-eslint 版本打架",
+            "names": ["阿越", "摩顺卡", "蛋蛋"],
             "tags": ["计算机与编程"],
             "time": "10:12-10:41",
-            "members": "A同学、B同学、C同学",
-            "summary": "A 同学先说流水线在 lint 阶段挂了，报错是 eslint 9 与 @typescript-eslint "
-            "版本不匹配，一开始以为是缓存没清，重跑两次一样。B 同学看了日志说真正的问题是根目录 "
+            "members": "阿越、摩顺卡、蛋蛋",
+            "summary": "阿越先说流水线在 lint 阶段挂了，报错是 eslint 9 与 @typescript-eslint "
+            "版本不匹配，一开始以为是缓存没清，重跑两次一样。摩顺卡看了日志说真正的问题是根目录 "
             "package.json 里两个包的主版本号差了一个大版本，并且建议报错要落到具体步骤名上才好定位。"
-            "中间 C 同学插话说他们项目已经升到 flat config，配置文件要换名字。最后 A 把流水线拆成 "
+            "中间 蛋蛋插话说他们项目已经升到 flat config，配置文件要换名字。最后 A 把流水线拆成 "
             "lint / test 两个 job，各自钉版本，跑通了（有配图）。共识是：这类问题先看版本对齐，"
             "再谈缓存。",
             "count": 26,
         },
         {
             "title": "接口 p99 从 52ms 涨到 120ms，锅在缓存 key",
+            "names": ["悠嫣咪", "老K"],
             "tags": ["计算机与编程"],
             "time": "11:03-11:58",
-            "members": "E同学、F同学",
-            "summary": "E 同学贴了监控截图，说 c 环境 p99 从 52ms 涨到 120ms，前端同事已经开始骂了。"
-            "两个人先怀疑慢查询，把 SQL 拉出来看没变化；F 同学注意到命中率掉到 0，翻提交记录发现"
+            "members": "悠嫣咪、老K",
+            "summary": "悠嫣咪贴了监控截图，说 c 环境 p99 从 52ms 涨到 120ms，前端同事已经开始骂了。"
+            "两个人先怀疑慢查询，把 SQL 拉出来看没变化；老K注意到命中率掉到 0，翻提交记录发现"
             "缓存 key 少了版本号，发布时新旧 key 不一致，等于每次全穿透。补上版本号后回到 46ms（有配图）。",
             "count": 31,
         },
         {
             "title": "200k 上下文实测：中段召回不如分块",
+            "names": ["老K", "小满", "青柠"],
             "tags": ["AI 与模型"],
             "time": "14:20-15:02",
-            "members": "F同学、G同学、H同学",
-            "summary": "群里在传某模型新版本支持 200k 上下文。F 同学拿三份 PDF 做了检索测试，把答案放在"
-            "文档中段，发现召回明显变差，越靠中间越容易漏。G 同学补充说这是长上下文的老问题，"
-            "位置编码插值救不了，结论是还不如老老实实分块 + 重排。H 同学问那长文档摘要能不能一次丢进去，"
+            "members": "老K、小满、青柠",
+            "summary": "群里在传某模型新版本支持 200k 上下文。老K拿三份 PDF 做了检索测试，把答案放在"
+            "文档中段，发现召回明显变差，越靠中间越容易漏。小满补充说这是长上下文的老问题，"
+            "位置编码插值救不了，结论是还不如老老实实分块 + 重排。青柠问那长文档摘要能不能一次丢进去，"
             "被两个人劝退，说成本也不划算。",
             "count": 24,
         },
         {
             "title": "2026 暑期实习开投，后端仍要 Go + MySQL",
+            "names": ["青柠", "阿吉"],
             "tags": ["工作与就业"],
             "time": "16:40-17:15",
-            "members": "H同学、I同学",
-            "summary": "某厂 2026 暑期实习开始投递，后端岗位要求熟悉 Go 与 MySQL，H 同学说简历投出去两天"
-            "就有笔试邀请，流程比去年快。I 同学提醒手写 LRU 是高频题，先把双向链表 + 哈希写完再谈优化；"
+            "members": "青柠、阿吉",
+            "summary": "某厂 2026 暑期实习开始投递，后端岗位要求熟悉 Go 与 MySQL，青柠说简历投出去两天"
+            "就有笔试邀请，流程比去年快。阿吉提醒手写 LRU 是高频题，先把双向链表 + 哈希写完再谈优化；"
             "两个人还聊到简历上项目要写清自己负责的那部分，别写成团队总结。",
             "count": 18,
         },
@@ -127,12 +135,12 @@ SCENE_FULL = {
     "quotes": [
         {
             "content": "这个报错不是我的问题，是流水线的问题。",
-            "sender": "A同学",
+            "sender": "阿越",
             "reason": "经典甩锅句式，后面被打脸说 yml 里版本没钉，技术性打脸。",
         },
         {
             "content": "缓存不是玄学，是你把 key 写错了。",
-            "sender": "E同学",
+            "sender": "悠嫣咪",
             "reason": "一句话把缓存命中的因果讲清楚，比教程好记。",
         },
     ],
@@ -149,6 +157,7 @@ SCENE_LIGHT = {
     "topics": [
         {
             "title": "386 主板换完电容还是不亮机",
+            "names": ["老周", "一只雀斑猪", "31415"],
             "tags": ["老式硬件", "维修改装"],
             "time": "20:11-21:26",
             "members": "老周、一只雀斑猪、31415",
@@ -160,6 +169,7 @@ SCENE_LIGHT = {
         },
         {
             "title": "487 主板改 DX2-66 的跳线",
+            "names": ["31415", "一只雀斑猪"],
             "tags": ["维修改装"],
             "time": "21:40-22:03",
             "members": "31415、一只雀斑猪",
@@ -224,6 +234,11 @@ def render_report(scene: str, out: Path, fonts: str, ppi: int) -> None:
         img_dir.mkdir(exist_ok=True)
         payload = dict(payload)
         payload["images"] = []
+        # 正文里的昵称也要切出来，跟插件一样把它们排成浅一点的色
+        payload["topics"] = [
+            dict(t, parts=split_names(t.get("summary", ""), t.get("names", [])))
+            for t in payload.get("topics", [])
+        ]
         for i, source in enumerate(shots):
             dst = img_dir / f"{i}.png"
             _compile_typst_source(source, dst, fonts, 140)
