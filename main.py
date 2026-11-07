@@ -445,7 +445,7 @@ class TechDigestPlugin(Star):
     async def silence_result(self, event: AstrMessageEvent):
         """第三道闸：回复已经生成也不发出去。"""
         # 工具已经自己把报告图发出去了，模型这句「好的我帮你生成」就不要再发了
-        if event.get_extra("tech_digest_tool_sent"):
+        if event.get_extra("chat_intel_tool_sent"):
             result = event.get_result()
             if result is not None and getattr(result, "chain", None):
                 result.chain = []
@@ -1404,9 +1404,9 @@ class TechDigestPlugin(Star):
             return None
         slug = re.sub(r"[^\w\-]+", "", label) or "report"
         out = self.reports_dir / (
-            f"tech_digest_{gid}_{datetime.now():%Y%m%d_%H%M%S}_{slug}.png"
+            f"chat_intel_{gid}_{datetime.now():%Y%m%d_%H%M%S}_{slug}.png"
         )
-        job = Path(tempfile.mkdtemp(prefix="tech_digest_"))
+        job = Path(tempfile.mkdtemp(prefix="chat_intel_"))
         try:
             shutil.copyfile(self.template, job / "main.typ")
             img_dir = job / "img"
@@ -1516,14 +1516,6 @@ class TechDigestPlugin(Star):
             "headline": str(data.get("headline") or "").strip(),
             "sections": sections,
             "quotes": self._norm_list(quotes, ("content", "sender", "reason")),
-            # 兼容旧模板：Task 7 换成按 sections 渲染后这三行可以删掉
-            "topics": [
-                {"title": item["topic"], "detail": item.get("detail", ""), "people": ""}
-                for item in flat_items
-            ],
-            "tools": [],
-            "jobs": [],
-            "ai_news": [],
             "footer": f"生成于 {now:%Y-%m-%d %H:%M} · {PLUGIN_NAME} · 本报告不会发到群里",
         }
 
@@ -1712,7 +1704,7 @@ class TechDigestPlugin(Star):
         since, until, label, incremental = rng
 
         # 生成可能要好几分钟，先立刻回话，图由后台任务直接发到聊天里
-        event.set_extra("tech_digest_tool_sent", True)
+        event.set_extra("chat_intel_tool_sent", True)
         asyncio.create_task(
             self._generate_and_send(
                 event.unified_msg_origin, since, until, label, incremental, gid
