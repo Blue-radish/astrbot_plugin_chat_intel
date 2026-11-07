@@ -18,7 +18,7 @@ ROOT = HERE.parent
 TEMPLATE = ROOT / "templates" / "report.typ"
 LOGO = ROOT / "assets" / "logo.typ"
 
-FOOTER = f"生成于 {datetime.now():%Y-%m-%d %H:%M} · astrbot_plugin_tech_digest · 本报告不会发到群里"
+FOOTER = f"生成于 {datetime.now():%Y-%m-%d %H:%M} · astrbot_plugin_chat_intel · 本报告不会发到群里"
 
 # 群里贴的报错截图（样张占位，用 Typst 画，避免往仓库塞真实群图）
 SHOT_TERMINAL = """
@@ -70,45 +70,65 @@ SHOT_CHART = """
 ]
 """
 
+# 样张 1：内容较满的一群（MeowShelter 的四个兴趣点命中三个）
 SCENE_FULL = {
-    "title": "技术情报日报",
+    "title": "群聊情报",
     "date": "2026-11-07",
     "group": "MeowShelter",
-    "stats": {"line": "1286 条消息 · 34 人参与 · 今天"},
-    "headline": "今天群里主要在修 CI、聊论文 novelty，以及远程开发机怎么配。",
-    "topics": [
-        {
-            "title": "CI 报错与持续集成",
-            "detail": "A 同学的流水线在 lint 阶段挂掉，报错是 eslint 9 与 @typescript-eslint 版本不匹配；"
-            "B 同学指出持续集成只管「每次提交都跑一遍」，报错要落到具体步骤名上才好定位，"
-            "最后改成拆成 lint / test 两个 job（有配图）。",
-            "people": "A同学、B同学",
-        },
-        {
-            "title": "论文审稿与 novelty",
-            "detail": "C 同学论文二审被审稿人指出 novelty 不足。D 同学给出「逐条 rebuttal + 补一个消融实验」的方案，"
-            "并提醒公开评审下意见是公开的，别硬刚。",
-            "people": "C同学、D同学",
-        },
-        {
-            "title": "接口 p99 回归",
-            "detail": "E 同学发现 c 环境 p99 从 52ms 涨到 120ms，最后定位在缓存 key 少了版本号，"
-            "命中率掉到 0；补上版本号后回到 46ms（有配图）。",
-            "people": "E同学、F同学",
-        },
-    ],
-    "tools": [
-        {"name": "Typst", "url": "https://typst.app", "note": "现代排版系统，编译快，适合生成报表长图"},
-        {"name": "Tailscale", "url": "https://tailscale.com", "note": "基于 WireGuard 的组网，穿透内网不用配端口映射"},
-        {"name": "astrbot_plugin_tech_digest", "url": "https://github.com/Blue-radish/astrbot_plugin_tech_digest", "note": "本插件：把群聊压成一份技术简报"},
-    ],
-    "jobs": [
-        {"text": "某厂 2026 暑期实习开始投递，后端岗位要求熟悉 Go 与 MySQL", "who": "G同学"},
-        {"text": "面试反馈：手写 LRU 是高频题，先把双向链表 + 哈希写完再谈优化", "who": "H同学"},
-    ],
-    "ai_news": [
-        {"text": "群里在传某模型新版本支持 200k 上下文，实测长文档检索效果一般"},
-        {"text": "有人用 Agent 框架把日报流程全自动化，成本比人工低一个量级"},
+    "stats": {"line": "1286 条消息 · 采纳 9 条 · 上限截断 0 条 · 今天"},
+    "headline": "今天群里主要在修 CI、聊模型评测，以及暑期实习投递。",
+    "sections": [
+        (
+            "计算机与编程（语言、框架、报错原文、方案讨论）",
+            [
+                {
+                    "topic": "CI 报错与持续集成",
+                    "detail": "A 同学的流水线在 lint 阶段挂掉，报错是 eslint 9 与 @typescript-eslint "
+                    "版本不匹配；B 同学指出报错要落到具体步骤名上才好定位，最后拆成 lint / test "
+                    "两个 job（有配图）。",
+                    "kind": "讨论",
+                },
+                {
+                    "topic": "接口 p99 回归",
+                    "detail": "E 同学发现 c 环境 p99 从 52ms 涨到 120ms，最后定位在缓存 key 少了版本号，"
+                    "命中率掉到 0；补上版本号后回到 46ms（有配图）。",
+                    "kind": "排障",
+                },
+            ],
+        ),
+        (
+            "AI 与模型（发布、评测、用法、踩坑）",
+            [
+                {
+                    "topic": "长上下文实测",
+                    "detail": "群里在传某模型新版本支持 200k 上下文，F 同学拿三份 PDF 做了检索测试，"
+                    "发现长文档中段的召回明显变差，结论是还不如分块。",
+                    "kind": "评测",
+                },
+                {
+                    "topic": "日报流程自动化",
+                    "detail": "G 同学用 Agent 框架把日报从拉取到排版全自动跑通，成本比人工低一个量级，"
+                    "但提醒模型偶尔会把两个群的内容混在一起。",
+                    "kind": "玩法",
+                },
+            ],
+        ),
+        (
+            "工作与就业（招聘、面试、简历、行业动向）",
+            [
+                {
+                    "topic": "暑期实习开投",
+                    "detail": "某厂 2026 暑期实习开始投递，后端岗位要求熟悉 Go 与 MySQL；"
+                    "H 同学说简历投出去两天就有笔试邀请。",
+                    "kind": "招聘",
+                },
+                {
+                    "topic": "面试手写题",
+                    "detail": "I 同学面试反馈：手写 LRU 是高频题，先把双向链表 + 哈希写完再谈优化。",
+                    "kind": "面试",
+                },
+            ],
+        ),
     ],
     "quotes": [
         {
@@ -117,53 +137,73 @@ SCENE_FULL = {
             "reason": "经典甩锅句式，后面被打脸说 yml 里少写了一步，技术性打脸。",
         },
         {
-            "content": "novelty 不够就补实验，不要跟审稿人对喷。",
-            "sender": "D同学",
-            "reason": "科研圈的实用主义，比任何情绪输出都值钱。",
+            "content": "缓存不是玄学，是你把顺序写错了。",
+            "sender": "E同学",
+            "reason": "一句话把缓存命中的因果讲清楚，比教程好记。",
         },
     ],
     "footer": FOOTER,
 }
 
+# 样张 2：另一群、另一套兴趣（复古硬件），并演示「上限截断」
 SCENE_LIGHT = {
-    "title": "技术情报日报",
+    "title": "群聊情报",
     "date": "2026-11-08",
     "group": "極東電子考古學結社",
-    "stats": {"line": "412 条消息 · 21 人参与 · 昨天"},
-    "headline": "今天只有零星技术讨论：一个 Docker 构建缓存问题，加一个开源项目推荐。",
-    "topics": [
-        {
-            "title": "Docker 构建缓存失效",
-            "detail": "J 同学发现 CI 里每次 build 都重新拉依赖，原因是 Dockerfile 里先 COPY . . 再 "
-            "npm ci，缓存层被源码变更打穿；改成先 COPY package*.json 再 npm ci 后恢复。",
-            "people": "J同学",
-        }
+    "stats": {"line": "412 条消息 · 采纳 15 条 · 上限截断 2 条 · 昨天"},
+    "headline": "昨天在推进 x86 单板机：从选型、面包板原型到跑通 NetBSD。",
+    "sections": [
+        (
+            "复古计算机与老式硬件（当年的机器、芯片、接口、外设）",
+            [
+                {
+                    "topic": "80386EX 选型",
+                    "detail": "J 同学打算用集成度高的 80386EX 做 x86 单板机，K 同学提到 X86SoC 没用过，"
+                    "但电梯控制板里有类似方案。",
+                    "kind": "选型",
+                }
+            ],
+        ),
+        (
+            "维修、改装与自制经验（焊接、替换件、调试踩坑）",
+            [
+                {
+                    "topic": "面包板原型跑通",
+                    "detail": "J 同学先做面包板飞线原型，跑完裸机程序后移植 RTOS，最后试 NetBSD；"
+                    "期间发现 RAM 芯片选型是最大的坑。",
+                    "kind": "自制",
+                }
+            ],
+        ),
+        (
+            "老系统、老软件与文献档案（旧系统、老游戏、手册、扫描件）",
+            [
+                {
+                    "topic": "F22 上的 80386",
+                    "detail": "L 同学提到 F22 子系统的主处理器是 80386，属于冷门硬件逸闻，记录里没有进一步核实。",
+                    "kind": "逸闻",
+                }
+            ],
+        ),
     ],
-    "tools": [
-        {"name": "uv", "url": "https://github.com/astral-sh/uv", "note": "Rust 写的 Python 包管理器，装依赖比 pip 快得多"},
-    ],
-    "jobs": [],
-    "ai_news": [],
     "quotes": [
         {
-            "content": "缓存不是玄学，是你把顺序写错了。",
-            "sender": "J同学",
-            "reason": "一句话把 Docker 层缓存的因果讲清楚，比教程好记。",
+            "content": "1G 以内分配参考面，线宽算一下，不要割裂参考面就行。",
+            "sender": "M同学",
+            "reason": "简短的高速布线经验，信息量足。",
         }
     ],
     "footer": FOOTER,
 }
 
+# 样张 3：这段时间没有命中兴趣的内容
 SCENE_QUIET = {
-    "title": "技术情报日报",
+    "title": "群聊情报",
     "date": "2026-11-09",
     "group": "MeowShelter",
-    "stats": {"line": "233 条消息 · 15 人参与 · 最新消息"},
+    "stats": {"line": "233 条消息 · 采纳 0 条 · 上限截断 0 条 · 最新消息"},
     "headline": "",
-    "topics": [],
-    "tools": [],
-    "jobs": [],
-    "ai_news": [],
+    "sections": [],
     "quotes": [],
     "footer": FOOTER,
 }
@@ -176,7 +216,7 @@ SCENES = {
 
 
 def _compile_typst_source(source: str, out: Path, fonts: str, ppi: int) -> None:
-    job = Path(tempfile.mkdtemp(prefix="tech_digest_shot_"))
+    job = Path(tempfile.mkdtemp(prefix="chat_intel_shot_"))
     try:
         (job / "main.typ").write_text(source, encoding="utf-8")
         kwargs = {"font_paths": [fonts]} if fonts else {}
@@ -194,7 +234,7 @@ def _compile_typst_source(source: str, out: Path, fonts: str, ppi: int) -> None:
 
 def render_report(scene: str, out: Path, fonts: str, ppi: int) -> None:
     payload, shots = SCENES[scene]
-    job = Path(tempfile.mkdtemp(prefix="tech_digest_"))
+    job = Path(tempfile.mkdtemp(prefix="chat_intel_"))
     try:
         shutil.copyfile(TEMPLATE, job / "main.typ")
         img_dir = job / "img"

@@ -81,6 +81,21 @@ def test_load_records_dedupes_two_bots(tmp_path):
     assert len(p._load_records("1", 0, 10**12)) == 1
 
 
+def test_load_records_ignores_rows_without_gid(tmp_path):
+    """没有群号的旧行不能算到"第一个群"头上（老版本的回退写法会串数据）。"""
+    p = _plugin(tmp_path)
+    rows = [
+        {"t": 100, "uid": "a", "name": "a", "text": "旧版本写的行", "platform": ""},
+        {"t": 100, "gid": "1", "uid": "b", "name": "b", "text": "本群的行"},
+    ]
+    (tmp_path / "2026-11-07.jsonl").write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in rows), encoding="utf-8"
+    )
+    got = p._load_records("1", 0, 10**12)
+    assert len(got) == 1
+    assert got[0]["text"] == "本群的行"
+
+
 def test_load_records_keeps_distinct_messages(tmp_path):
     p = _plugin(tmp_path)
     rows = [
