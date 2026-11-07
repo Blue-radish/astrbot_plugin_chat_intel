@@ -55,7 +55,7 @@
   },
   "days": {
     "type": "float",
-    "description": "首次生成（还没有上次记录）时回溯多少天",
+    "description": "手动/对话触发时，第一次（还没有上次记录）回溯多少天",
     "default": 1.0
   },
   "max_messages": {
@@ -104,7 +104,7 @@
   },
   "daily_time": {
     "type": "string",
-    "description": "每天自动生成的时间（HH:MM），留空则不定时；只总结上次之后的新消息",
+    "description": "每天自动生成的时间（HH:MM），每次总结过去 24 小时；留空则不定时",
     "default": "23:00"
   },
   "push_enabled": {
@@ -117,17 +117,6 @@
     "description": "推送目标会话 unified_msg_origin",
     "default": "",
     "hint": "格式 <平台id>:FriendMessage:<QQ号>，例如 mybot:FriendMessage:10001"
-  },
-  "provider_id": {
-    "type": "string",
-    "description": "指定模型供应商 id，留空用 AstrBot 默认",
-    "default": ""
-  },
-  "vision_provider_id": {
-    "type": "string",
-    "description": "判图用的视觉模型供应商 id，留空则用上面那个（模型需支持图片输入）",
-    "default": "",
-    "hint": "图片取舍靠它看图判断；留空且模型不支持读图时，退回尺寸/文字规则"
   },
   "keep_quotes": {
     "type": "bool",
@@ -152,11 +141,6 @@
   "silence_platforms": {
     "type": "string",
     "description": "静默平台：这些平台实例永不回复任何消息，逗号分隔；留空则静默 platform_id",
-    "default": ""
-  },
-  "font_dir": {
-    "type": "string",
-    "description": "字体目录，留空用插件数据目录下的 fonts/",
     "default": ""
   }
 }

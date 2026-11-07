@@ -182,7 +182,7 @@ class TechDigestPlugin(Star):
             d.mkdir(parents=True, exist_ok=True)
         self.use_local_store = self._as_bool(self.config.get("use_local_store"), True)
         self.font_dir = Path(
-            str(self.config.get("font_dir") or "").strip() or (self.data_dir / "fonts")
+            (self.data_dir / "fonts")
         )
         self.font_dir.mkdir(parents=True, exist_ok=True)
         self.template = Path(__file__).parent / "templates" / "report.typ"
@@ -304,18 +304,20 @@ class TechDigestPlugin(Star):
         return getattr(inst, "bot", None)
 
     def _get_provider(self):
-        provider_id = str(self.config.get("provider_id") or "").strip()
-        if provider_id:
-            try:
-                p = self.context.provider_manager.get_provider_by_id(provider_id)
-                if p:
-                    return p
-            except Exception:
-                pass
+        """用 AstrBot 当前的默认对话模型，不用用户填 id。"""
         try:
             return self.context.get_using_provider()
         except Exception:
             return None
+
+    @staticmethod
+    def _vision_capable(provider) -> bool:
+        """模型配置里声明了能读图就算能读图（没声明就当作能，交给模型自己报错）。"""
+        cfg = getattr(provider, "provider_config", None)
+        modalities = cfg.get("modalities") if isinstance(cfg, dict) else None
+        if isinstance(modalities, list) and modalities:
+            return "image" in [str(m).lower() for m in modalities]
+        return True
 
     # ------------------------------------------------------------------ 静默通道
     @filter.event_message_type(filter.EventMessageType.ALL, priority=1000)
@@ -1371,23 +1373,26 @@ class TechDigestPlugin(Star):
         }
 
     def _get_vision_provider(self):
-        pid = str(self.config.get("vision_provider_id") or "").strip()
-        provider = None
-        if pid:
-            try:
-                provider = self.context.provider_manager.get_provider_by_id(pid)
-            except Exception:
-                provider = None
-        if provider is None:
-            provider = self._get_provider()
-        if provider is None:
-            return None
-        cfg = getattr(provider, "provider_config", None)
-        modalities = cfg.get("modalities") if isinstance(cfg, dict) else None
-        if isinstance(modalities, list) and "image" not in modalities:
-            logger.info(f"[{PLUGIN_NAME}] 当前模型不支持图片输入，图片退回规则筛选")
-            return None
-        return provider
+        """先看默认模型能不能读图；不能就翻一遍所有供应商，找一个声明支持的；都没有就退回规则筛图。"""
+        provider = self._get_provider()
+        if provider is not None and self._vision_capable(provider):
+            return provider
+        candidates = []
+        try:
+            insts = self.context.provider_manager.get_insts() or []
+            candidates = list(insts.values()) if isinstance(insts, dict) else list(insts)
+        except Exception as e:
+            logger.debug(f"[{PLUGIN_NAME}] 取供应商列表失败: {e}")
+        for cand in candidates:
+            if cand is provider:
+                continue
+            if self._vision_capable(cand):
+                cfg = getattr(cand, "provider_config", None)
+                name = cfg.get("id") if isinstance(cfg, dict) else None
+                logger.info(f"[{PLUGIN_NAME}] 判图改用能读图的模型 {name or '（未命名）'}")
+                return cand
+        logger.info(f"[{PLUGIN_NAME}] 没有能读图的模型，图片退回规则筛选")
+        return None
 
     async def _ask_which_images(
         self, candidates: list[dict], chat: ChatInterest | None = None
@@ -1692,17 +1697,7 @@ class TechDigestPlugin(Star):
                         else:
                             self._running = True
                             try:
-                                until = time.time()
-                                results = await self.generate_all(
-                                    0.0, until, "最新消息", True
-                                )
-                                for _gid, path, info, is_error in results:
-                                    if path is None:
-                                        logger.info(f"[{PLUGIN_NAME}] 定时跳过：{info}")
-                                        if is_error:
-                                            await self._push_text(f"日报出错：{info}")
-                                        continue
-                                    await self._push(path)
+                                await self._run_daily_once()
                             finally:
                                 self._running = False
             except asyncio.CancelledError:
@@ -1711,12 +1706,44 @@ class TechDigestPlugin(Star):
                 logger.error(f"[{PLUGIN_NAME}] 定时任务异常: {e}", exc_info=True)
             await asyncio.sleep(30)
 
+    async def _run_daily_once(self) -> None:
+        """定时档的一次执行：过去 24 小时、所有群、非增量、直接推送。
+
+        23:00 触发就是「昨天 23:00 到现在」，而不是「上次之后的新消息」——
+        后者一旦漏跑一次，那段就永远补不回来了。
+        """
+        since, until, label = self._daily_window(time.time())
+        logger.info(f"[{PLUGIN_NAME}] 定时范围：{label}（{datetime.fromtimestamp(since):%m-%d %H:%M} 起）")
+        results = await self.generate_all(since, until, label, False)
+        for _gid, path, info, is_error in results:
+            if path is None:
+                logger.info(f"[{PLUGIN_NAME}] 定时跳过：{info}")
+                if is_error:
+                    await self._push_text(f"群聊情报出错：{info}")
+                continue
+            await self._push(path)
+
+    @staticmethod
+    def _daily_window(now: float) -> tuple[float, float, str]:
+        """定时档的时间窗口：截至现在，往前整 24 小时。"""
+        return now - 24 * 3600, now, "最近 24 小时"
+
     async def initialize(self) -> None:
         self._prune_old_files()
         if not self.owner_uids:
             logger.warning(
                 f"[{PLUGIN_NAME}] 没有配置 owner_uids：任何私聊都能让它生成报告，"
                 "建议填上自己的 QQ 号"
+            )
+        missing_key = [
+            str(row.get("gid") or "?")
+            for row in (self.config.get("chats") or [])
+            if isinstance(row, dict) and not row.get("__template_key")
+        ]
+        if missing_key:
+            logger.warning(
+                f"[{PLUGIN_NAME}] 这些群的行缺少 __template_key（插件设置里会显示"
+                f"「未指定模板」）：{missing_key}；建议在界面上删掉重新添加"
             )
         for gid in self.group_ids:
             try:
