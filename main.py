@@ -390,11 +390,20 @@ class TechDigestPlugin(Star):
     # ------------------------------------------------------------------ 静默通道
     @filter.event_message_type(filter.EventMessageType.ALL, priority=1000)
     async def silence_events(self, event: AstrMessageEvent):
-        """第一道闸：静默平台的事件直接终止，同时把目标群的消息落盘。"""
+        """第一道闸：目标群的消息一律落盘（与是否禁言无关）；静默平台再终止事件。
+
+        采集与禁言是两件事：禁言只表示"这个账号不说话"，不该影响收数据。
+        所以先把消息记下来，再决定要不要让这个账号闭嘴。
+        """
         platform_id = self._platform_of(event)
+        try:
+            gid = str(event.get_group_id() or "")
+        except Exception:
+            gid = ""
+        if gid and gid in self.group_ids:
+            await self._record(event)
         if platform_id not in self.silence_platforms:
             return
-        await self._record(event)
         self._silenced += 1
         if self._silenced <= 3 or self._silenced % 200 == 0:
             try:
@@ -533,6 +542,7 @@ class TechDigestPlugin(Star):
                 "uid": uid,
                 "name": str(event.get_sender_name() or "")[:16],
                 "text": text[:280],
+                "platform": self._platform_of(event),
             }
             if images:
                 record["imgs"] = images
@@ -633,8 +643,26 @@ class TechDigestPlugin(Star):
             except Exception as e:
                 logger.debug(f"[{PLUGIN_NAME}] 读取 {path.name} 失败: {e}")
         out.sort(key=lambda r: int(r.get("t") or 0))
+        out = self._dedupe_records(out)
         if len(out) > self.max_messages:
             out = out[-self.max_messages :]
+        return out
+
+    @staticmethod
+    def _dedupe_records(records: list[dict]) -> list[dict]:
+        """同一条消息被两个 bot 各收一次时只留一条（与平台无关）。"""
+        seen: set[tuple] = set()
+        out: list[dict] = []
+        for rec in records:
+            key = (
+                str(rec.get("uid") or ""),
+                int(rec.get("t") or 0),
+                str(rec.get("text") or "")[:40],
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(rec)
         return out
 
     # ------------------------------------------------------------------ 拉历史
