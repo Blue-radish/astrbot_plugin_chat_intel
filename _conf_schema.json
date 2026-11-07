@@ -1,19 +1,56 @@
 ﻿{
-  "group_ids": {
-    "type": "string",
-    "description": "要监控的群号，多个用逗号分隔（必填）",
-    "default": "",
-    "hint": "例如 220002,220001；报告里只显示群名，不显示群号"
-  },
-  "group_names": {
-    "type": "string",
-    "description": "群名备注，留空则自动检测；格式 群号=群名，多个用逗号分隔",
-    "default": "",
-    "hint": "例如 220002=MeowShelter,220001=極東電子考古學結社"
+  "chats": {
+    "type": "template_list",
+    "description": "要总结的群（一行一个群，每群一份自己的兴趣）",
+    "hint": "报告里只显示群名；同一个群号写了两行只会用第一行",
+    "templates": {
+      "chat": {
+        "name": "群",
+        "items": {
+          "gid": {
+            "type": "string",
+            "description": "群号",
+            "default": ""
+          },
+          "platform": {
+            "type": "string",
+            "description": "用哪个 bot 拉这个群（平台 id，留空用下面的默认平台）",
+            "default": ""
+          },
+          "name": {
+            "type": "string",
+            "description": "群名备注（留空自动检测）",
+            "default": ""
+          },
+          "title": {
+            "type": "string",
+            "description": "这份报告的标题（留空用全局标题）",
+            "default": ""
+          },
+          "want": {
+            "type": "text",
+            "description": "想要的主题：一行一条，报告按这些主题分节",
+            "default": "",
+            "hint": "例如 复古计算机与老式硬件 / 电子元件行情与价格 / 维修与改装经验"
+          },
+          "not_want": {
+            "type": "text",
+            "description": "不要的主题：一行一条（可空）",
+            "default": "",
+            "hint": "例如 手机数码开箱 / 二手交易砍价"
+          },
+          "keywords": {
+            "type": "string",
+            "description": "关键词示例（可选，只作提示，不做硬匹配）",
+            "default": ""
+          }
+        }
+      }
+    }
   },
   "platform_id": {
     "type": "string",
-    "description": "用哪个 AstrBot 平台实例去拉消息（该账号必须在这些群里）",
+    "description": "默认读取账号：某个群没填 platform 时用它（发送走下面的推送会话）",
     "default": ""
   },
   "days": {

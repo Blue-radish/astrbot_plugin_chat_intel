@@ -1,4 +1,4 @@
-"""技术情报日报 —— 多群技术向日报，图片留存，本地排版，静默投递。
+"""群聊情报 —— 每个群一份兴趣，按兴趣总结群聊，图片留存，本地排版，静默投递。
 
 一件事做到底：
     1. 多群累积：静默通道里把目标群的消息（含图片）实时落盘
@@ -30,6 +30,11 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_chat_intel"
 
+
+try:  # 插件以包形式被 AstrBot 加载时走相对导入
+    from .interest import ChatInterest, parse_chats
+except ImportError:  # pragma: no cover - 单测按文件路径加载模块
+    from interest import ChatInterest, parse_chats
 
 try:  # 简繁归一化：群名可能是繁体，用户打的是简体
     from zhconv import convert as _zh_convert
@@ -160,7 +165,8 @@ class TechDigestPlugin(Star):
         super().__init__(context)
         self.config = config or {}
 
-        self.group_ids = self._parse_group_ids()
+        self.chats: list[ChatInterest] = []
+        self.group_ids: list[str] = []
         self.group_name_map = self._parse_group_names()
         try:
             self.days = float(self.config.get("days") or 1.0)
@@ -174,7 +180,7 @@ class TechDigestPlugin(Star):
         self.push_enabled = self._as_bool(self.config.get("push_enabled"), False)
         self.push_umo = str(self.config.get("push_umo") or "").strip()
         self.keep_quotes = self._as_bool(self.config.get("keep_quotes"), True)
-        self.report_title = str(self.config.get("report_title") or "技术情报日报").strip()
+        self.report_title = str(self.config.get("report_title") or "群聊情报").strip()
         try:
             self.ppi = max(72, int(self.config.get("render_ppi") or 180))
         except (TypeError, ValueError):
@@ -208,6 +214,8 @@ class TechDigestPlugin(Star):
             silence = [str(x).strip() for x in silence if str(x).strip()]
         self.platform_id = str(self.config.get("platform_id") or "").strip()
         self.silence_platforms = silence or ([self.platform_id] if self.platform_id else [])
+        # 必须在 platform_id 之后解析 chats：每群的 platform 缺省时要回退到它
+        self._apply_chats(self.config.get("chats"))
         self._silenced = 0
         self._llm_blocked = 0
         self._result_blocked = 0
@@ -249,7 +257,13 @@ class TechDigestPlugin(Star):
                 f"[{PLUGIN_NAME}] {self.font_dir} 里没有字体文件，中文可能显示为方框。"
             )
         if not self.group_ids:
-            logger.warning(f"[{PLUGIN_NAME}] 还没配置 group_ids，生成前请先填群号")
+            logger.warning(f"[{PLUGIN_NAME}] 还没配置 chats（群），生成前请先在设置里加群")
+        else:
+            no_want = [c.gid for c in self.chats if not c.want]
+            if no_want:
+                logger.warning(
+                    f"[{PLUGIN_NAME}] 这些群还没配置「想要的主题」，生成时会跳过：{no_want}"
+                )
 
     # ------------------------------------------------------------------ 配置解析
     @staticmethod
@@ -283,6 +297,46 @@ class TechDigestPlugin(Star):
                 mapping[gid] = name
         return mapping
 
+    def _apply_chats(self, raw) -> None:
+        """把配置里的 chats 解析成 ChatInterest 列表，并派生 group_ids。"""
+        fallback = getattr(self, "platform_id", "") or ""
+        chats, skipped = parse_chats(raw, fallback)
+        if not chats:
+            legacy = self._parse_group_ids()
+            if legacy:
+                chats = [ChatInterest(gid=gid, platform=fallback) for gid in legacy]
+                logger.warning(
+                    f"[{PLUGIN_NAME}] 检测到旧配置 group_ids={legacy}，已临时当作 chats 使用；"
+                    f"请在设置界面为每个群补上「想要的主题」"
+                )
+        self.chats = chats
+        self.group_ids = [c.gid for c in chats]
+        if skipped:
+            logger.warning(f"[{PLUGIN_NAME}] 这些 chats 行没有群号，已跳过：{skipped}")
+
+    def _chat(self, gid: str | None) -> ChatInterest | None:
+        if not gid:
+            return None
+        for chat in self.chats:
+            if chat.gid == str(gid):
+                return chat
+        return None
+
+    @staticmethod
+    def _chat_status_line(
+        chat: ChatInterest, name: str, count: int, imgs: int, last: str
+    ) -> str:
+        """状态里每个群一行：谁在采集、今天多少条、上次覆盖到哪。"""
+        parts = [f"{name}（{chat.gid}）"]
+        parts.append(f"采集 {chat.platform or '未配置'}")
+        parts.append(f"今日 {count} 条 / 带图 {imgs} 条")
+        parts.append(f"上次报告覆盖到 {last or '还没生成过'}")
+        if chat.want:
+            parts.append(f"兴趣 {len(chat.want)} 条")
+        else:
+            parts.append("⚠ 未配置兴趣")
+        return " · ".join(parts)
+
     # ------------------------------------------------------------------ 状态
     def _load_state(self) -> dict:
         if self.state_path.is_file():
@@ -304,11 +358,15 @@ class TechDigestPlugin(Star):
         return self.state.setdefault("groups", {}).setdefault(gid, {})
 
     # ------------------------------------------------------------------ 基础
-    def _get_bot(self):
-        if not self.platform_id:
+    def _get_bot(self, gid: str | None = None):
+        platform_id = self.platform_id
+        chat = self._chat(gid)
+        if chat is not None and chat.platform:
+            platform_id = chat.platform
+        if not platform_id:
             return None
         try:
-            inst = self.context.get_platform_inst(self.platform_id)
+            inst = self.context.get_platform_inst(platform_id)
         except Exception:
             inst = None
         if inst is None:
@@ -1719,10 +1777,16 @@ class TechDigestPlugin(Star):
                 else "还没生成过"
             )
             imgs = sum(1 for r in today_records if r.get("imgs"))
-            lines.append(
-                f"{name}（{gid}）：今日 {len(today_records)} 条 / 带图 {imgs} 条 · "
-                f"上次报告覆盖到 {last}"
-            )
+            chat = self._chat(gid)
+            if chat is not None:
+                lines.append(
+                    self._chat_status_line(chat, name, len(today_records), imgs, last)
+                )
+            else:
+                lines.append(
+                    f"{name}（{gid}）：今日 {len(today_records)} 条 / 带图 {imgs} 条 · "
+                    f"上次报告覆盖到 {last}"
+                )
         lines.append(
             f"平台 {self.platform_id or '未配置'} · 静默 {'、'.join(self.silence_platforms) or '无'}"
             f"（拦下事件 {self._silenced} / LLM {self._llm_blocked} / 回复 {self._result_blocked}）"
