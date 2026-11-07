@@ -58,10 +58,6 @@ except Exception:  # pragma: no cover - 没装就退化成原文匹配
     _zh_convert = None
 
 # 报告里各板块的条数上限（合并多个分片后仍要克制）
-CAP_TOPICS = 8
-CAP_TOOLS = 10
-CAP_JOBS = 8
-CAP_AI_NEWS = 6
 CAP_QUOTES = 4
 
 IMG_CACHE_VERSION = 4  # 判据说辞/判据维度变化时 +1，旧缓存作废（4：判图改用每群兴趣）
@@ -115,15 +111,16 @@ TECH_HINTS = (
 
 SYSTEM_PROMPT = """你在给群友写一份私人情报简报。文字克制、具体、可执行。"""
 
-@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份兴趣，按兴趣总结群聊，视觉模型筛图，本地排版成图，静默私聊投递", "1.2.2")
+@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份兴趣，按兴趣总结群聊，视觉模型筛图，本地排版成图，静默私聊投递", "2.0.0")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
         self.config = config or {}
 
         self.chats: list[ChatInterest] = []
+        self._pending: tuple | None = None
         self.group_ids: list[str] = []
-        self.group_name_map = self._parse_group_names()
+        self.group_name_map: dict[str, str] = {}
         try:
             self.days = float(self.config.get("days") or 1.0)
         except (TypeError, ValueError):
@@ -230,29 +227,6 @@ class TechDigestPlugin(Star):
             return value.strip().lower() in ("1", "true", "yes", "on", "是", "开")
         return bool(value)
 
-    def _parse_group_ids(self) -> list[str]:
-        raw = self.config.get("group_ids")
-        if not raw:
-            raw = self.config.get("group_id") or ""
-        if isinstance(raw, (list, tuple)):
-            items = [str(x).strip() for x in raw]
-        else:
-            items = [x.strip() for x in re.split(r"[,，\s]+", str(raw))]
-        return [x for x in items if x.isdigit()]
-
-    def _parse_group_names(self) -> dict[str, str]:
-        raw = str(self.config.get("group_names") or "").strip()
-        mapping: dict[str, str] = {}
-        for pair in re.split(r"[,，;；\n]+", raw):
-            pair = pair.strip()
-            if not pair or "=" not in pair:
-                continue
-            gid, name = pair.split("=", 1)
-            gid, name = gid.strip(), name.strip()
-            if gid and name:
-                mapping[gid] = name
-        return mapping
-
     def _apply_chats(self, raw) -> None:
         """把配置里的 chats 解析成 ChatInterest 列表，并派生 group_ids。"""
         fallback = getattr(self, "platform_id", "") or ""
@@ -352,13 +326,17 @@ class TechDigestPlugin(Star):
         所以先把消息记下来，再决定要不要让这个账号闭嘴。
         """
         platform_id = self._platform_of(event)
+        silenced = platform_id in self.silence_platforms
+        if silenced:
+            # 先闭嘴再去采集：图片下载可能要几秒，别让"不说话"这件事被拖住
+            event.stop_event()
         try:
             gid = str(event.get_group_id() or "")
         except Exception:
             gid = ""
         if gid and gid in self.group_ids:
             await self._record(event)
-        if platform_id not in self.silence_platforms:
+        if not silenced:
             return
         self._silenced += 1
         if self._silenced <= 3 or self._silenced % 200 == 0:
@@ -370,7 +348,6 @@ class TechDigestPlugin(Star):
                 f"[{PLUGIN_NAME}] 静默平台 {platform_id} 的事件（累计 {self._silenced} 条，"
                 f"最近来自 {sender}）"
             )
-        event.stop_event()
 
     # ------------------------------------------------------------------ 大白话直通
     def _should_act(self, text: str, intent) -> bool:
@@ -433,7 +410,24 @@ class TechDigestPlugin(Star):
             f"[{PLUGIN_NAME}] 直通 {intent.kind}：范围={label} 增量={incremental} "
             f"群={gid or '全部'} 命中「{intent.anchor}+{intent.action}」原文「{text}」"
         )
-        await self._generate_and_send(umo, since, until, label, incremental, gid)
+        if self._running:
+            self._pending = (umo, since, until, label, incremental, gid, True)
+            await self._send_text(umo, "上一份还在生成，这份先排队，跑完接着来。")
+            return
+        await self._generate_and_send(
+            umo, since, until, label, incremental, gid, announce=True
+        )
+
+    async def _drain_pending(self) -> None:
+        """把排队的那一份接着跑掉。"""
+        request = self._pending
+        if request is None:
+            return
+        self._pending = None
+        try:
+            await self._generate_and_send(*request)
+        except Exception as e:
+            logger.error(f"[{PLUGIN_NAME}] 排队的那份生成失败: {e}", exc_info=True)
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=900)
     async def intercept_digest_intent(self, event: AstrMessageEvent):
@@ -447,9 +441,6 @@ class TechDigestPlugin(Star):
         if not self._should_act(text, intent):
             return
         event.stop_event()  # 模型这段就别开口了
-        if self._running:
-            await self._send_text(event.unified_msg_origin, "上一份还在生成，跑完会直接把图发给你。")
-            return
         asyncio.create_task(self._handle_intent(event, intent))
 
     @filter.on_llm_request()
@@ -472,6 +463,9 @@ class TechDigestPlugin(Star):
             logger.warning(
                 f"[{PLUGIN_NAME}] 拦下一次 LLM 请求（平台 {platform_id}，累计 {self._llm_blocked} 次）"
             )
+        # 光返回 True 没用：AstrBot 的 call_event_hook 只看 event.is_stopped()，
+        # 必须真的把事件停掉，否则模型照样会跑一遍（只是回复被第三道闸清掉）
+        event.stop_event()
         return True
 
     @filter.on_decorating_result()
@@ -529,7 +523,7 @@ class TechDigestPlugin(Star):
             if not text and not images:
                 return
             record = {
-                "t": int(time.time()),
+                "t": self._event_time(event),
                 "gid": gid,
                 "uid": uid,
                 "name": str(event.get_sender_name() or "")[:16],
@@ -543,6 +537,19 @@ class TechDigestPlugin(Star):
                 fh.write(json.dumps(record, ensure_ascii=False) + "\n")
         except Exception as e:
             self._diag("异常", repr(e), exc=True)
+
+    @staticmethod
+    def _event_time(event) -> int:
+        """优先用 OneBot 事件自带的时间：两个 bot 跨秒收到同一条消息时才去得掉重。"""
+        raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+        if isinstance(raw, dict):
+            try:
+                stamp = int(raw.get("time") or 0)
+                if stamp > 0:
+                    return stamp
+            except (TypeError, ValueError):
+                pass
+        return int(time.time())
 
     @staticmethod
     def _event_image_urls(event) -> list[str]:
@@ -659,8 +666,10 @@ class TechDigestPlugin(Star):
         return out
 
     # ------------------------------------------------------------------ 拉历史
-    async def _fetch_history(self, gid: str, since: float) -> list[dict]:
-        bot = self._get_bot()
+    async def _fetch_history(
+        self, gid: str, since: float, until: float | None = None
+    ) -> list[dict]:
+        bot = self._get_bot(gid)
         if bot is None or not hasattr(bot, "call_action"):
             return []
         collected: list[dict] = []
@@ -684,7 +693,8 @@ class TechDigestPlugin(Star):
                 if not mid or mid in seen:
                     continue
                 seen.add(mid)
-                if int(m.get("time") or 0) >= since:
+                t = int(m.get("time") or 0)
+                if t >= since and (until is None or t < until):
                     collected.append(m)
                     added += 1
             oldest_msg = min(batch, key=lambda m: int(m.get("time") or 0))
@@ -787,7 +797,7 @@ class TechDigestPlugin(Star):
         """群名自动检测。报告图里只用群名，文字回复里会带群号。"""
         if gid in self.group_name_map:
             return self.group_name_map[gid]
-        bot = self._get_bot()
+        bot = self._get_bot(gid)
         if bot is None or not hasattr(bot, "call_action"):
             self._diag("取群名失败", "拿不到 bot 实例")
             return "群聊"
@@ -1162,7 +1172,6 @@ class TechDigestPlugin(Star):
         }
 
     # ------------------------------------------------------------------ 图片挑选
-    @staticmethod
     async def _alert_missing_want(self, group_name: str, gid: str) -> None:
         """某个群没配「想要的主题」时私聊提醒一次，不反复骚扰。"""
         key = f"warned_want_{gid}"
@@ -1179,6 +1188,7 @@ class TechDigestPlugin(Star):
         except Exception as e:
             logger.warning(f"[{PLUGIN_NAME}] 告警发送失败: {e}")
 
+    @staticmethod
     def _image_dims(path: Path) -> tuple[int, int]:
         """返回 (宽, 高)；读不出来给 (0, 0)。"""
         try:
@@ -1391,7 +1401,8 @@ class TechDigestPlugin(Star):
             ts = int(rec.get("t") or 0)
             stamp = datetime.fromtimestamp(ts).strftime("%H:%M") if ts else "--:--"
             lines.append(
-                f"#{i} 发送者={rec.get('name') or '?'} 时间={stamp} 尺寸={cand.get('meta') or '?'} "
+                f"#{i} 发送者={rec.get('name') or '?'} 时间={stamp} "
+                f"尺寸={self._image_dims(cand['files'][0])[0]}x{self._image_dims(cand['files'][0])[1]} "
                 f"本条={str(rec.get('text') or '(无文字)')[:80]} "
                 f"上文={cand['prev'][-60:] or '(无)'} 下文={cand['next'][:60] or '(无)'}"
             )
@@ -1501,13 +1512,14 @@ class TechDigestPlugin(Star):
         if not chat.want:
             group_name = await self._group_name(gid)
             await self._alert_missing_want(group_name, gid)
-            return None, f"{group_name}：这个群还没配置「想要的主题」，跳过", True
+            # 已经在上面私聊提醒过了，这里不再当成"出错"再喊一遍
+            return None, f"{group_name}：这个群还没配置「想要的主题」，跳过", False
         real_since = self._resolve_since(gid, since, incremental, until)
         group_name = await self._group_name(gid)
 
         records = self._load_records(gid, real_since, until) if self.use_local_store else []
         if len(records) < 20:
-            history = await self._fetch_history(gid, real_since)
+            history = await self._fetch_history(gid, real_since, until)
             if history:
                 seen: set[tuple] = set()
                 merged: list[dict] = []
@@ -1624,9 +1636,21 @@ class TechDigestPlugin(Star):
                 out.append(row)
         return out
 
+    def _push_target_ok(self) -> bool:
+        """投递口必须存在、且**不是群**——「报告永不发回群里」不能只靠配置自觉。"""
+        if not getattr(self, "push_enabled", False) or not getattr(self, "push_umo", ""):
+            return False
+        if "GroupMessage" in self.push_umo:
+            logger.error(
+                f"[{PLUGIN_NAME}] push_umo 指向群聊（{self.push_umo}），拒绝发送："
+                "报告永不发回群里"
+            )
+            return False
+        return True
+
     async def _push(self, path: Path) -> bool:
         """只发报告图，不带任何说明文字。"""
-        if not self.push_enabled or not self.push_umo:
+        if not self._push_target_ok():
             return False
         try:
             ok = await self.context.send_message(
@@ -1641,7 +1665,7 @@ class TechDigestPlugin(Star):
 
     async def _push_text(self, text: str) -> bool:
         """只有出错时才发文字。"""
-        if not self.push_enabled or not self.push_umo:
+        if not self._push_target_ok():
             return False
         try:
             return bool(
@@ -1689,6 +1713,16 @@ class TechDigestPlugin(Star):
 
     async def initialize(self) -> None:
         self._prune_old_files()
+        if not self.owner_uids:
+            logger.warning(
+                f"[{PLUGIN_NAME}] 没有配置 owner_uids：任何私聊都能让它生成报告，"
+                "建议填上自己的 QQ 号"
+            )
+        for gid in self.group_ids:
+            try:
+                await self._group_name(gid)  # 预热群名，免得刚启动时按名字找不到群
+            except Exception as e:
+                logger.debug(f"[{PLUGIN_NAME}] 预热群名失败 {gid}: {e}")
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._scheduler())
 
@@ -1703,6 +1737,27 @@ class TechDigestPlugin(Star):
 
     # ------------------------------------------------------------------ 命令
     # ------------------------------------------------------------------ 模型工具
+    # 用户话里出现这些，才算"在要群聊总结"。实测模型会把"群里今天有什么好玩的"
+    # 也当成要报告，所以工具入口再判一次，别让兜底变成乱跑。
+    _TOOL_CUES = (
+        "总结",
+        "日报",
+        "情报",
+        "聊了啥",
+        "聊了什么",
+        "聊了些啥",
+        "讨论了什么",
+        "跑一份",
+        "来一份",
+        "出一份",
+        "生成一份",
+        "群聊",
+    )
+
+    def _tool_cue(self, event: AstrMessageEvent) -> bool:
+        text = str(getattr(event, "message_str", "") or "")
+        return any(cue in text for cue in self._TOOL_CUES)
+
     def _tool_allowed(self, event: AstrMessageEvent) -> bool:
         """只在私聊、且（配了的话）只允许主人调用。群里一律拒绝，避免把报告发到群里。"""
         try:
@@ -1723,9 +1778,10 @@ class TechDigestPlugin(Star):
     ) -> str:
         """查看被监控群聊的内容，并生成一份报告图直接发给用户。
 
-        只要用户想看群里聊了什么（"群里聊了啥"、"今天有什么技术话题"、"总结一下昨天的群"
-        "看看极东群"、"给我出个日报"），都必须调用本工具，不要凭记忆回答、也不要道歉说自己
-        看不到群消息。报告图由本工具负责发送，调用后不要再输出任何文字。
+        只有在用户**明确要群聊总结/日报**时才调用（"群里今天聊了啥"、"总结一下昨天的群"、
+        "看看极东群"、"给我出个日报"、"群聊情报跑一份"）。如果用户只是随口问"群里有什么好玩的"
+        "有什么推荐的吗"这类问题，**不要调用**本工具。要看群聊内容时不要凭记忆回答、也不要道歉
+        说自己看不到群消息。报告图由本工具负责发送，调用后不要再输出任何文字。
 
         Args:
             when(string): 时间范围，直接用用户原话即可，例如 今天 / 昨天 / 前天 / 最近3天 / 上周 / 2026-11-05；用户没提时间就留空，表示只看没看过的消息
@@ -1734,8 +1790,15 @@ class TechDigestPlugin(Star):
         """
         if not self._tool_allowed(event):
             return "这个工具只能在私聊里由主人使用；群里不会发任何报告。"
+        if not self._tool_cue(event):
+            return "用户这句话不是在要群聊总结，不要调用本工具，正常回答即可。"
         if self._running:
-            return "上一份还在生成，等它发出来再说。"
+            for _gid in self.group_ids:
+                await self._group_name(_gid)
+            rng, gid, _rest = self._resolve_request(f"{when} {group}".strip())
+            since, until, label, incremental = rng
+            self._pending = (event.unified_msg_origin, since, until, label, incremental, gid, True)
+            return "上一份还在生成，这份已经排队，跑完接着发。"
         if not self.group_ids:
             return "插件还没配置要监控的群，先让主人填 group_ids。"
 
@@ -1821,6 +1884,7 @@ class TechDigestPlugin(Star):
         label: str,
         incremental: bool,
         only_gid: str | None,
+        announce: bool = False,
     ) -> None:
         self._running = True
         try:
@@ -1832,6 +1896,9 @@ class TechDigestPlugin(Star):
                         await self.context.send_message(
                             umo, MessageChain().message(f"出错了：{info}")
                         )
+                    elif announce:
+                        # 用户主动问的，即使没东西也得回一句，不能当没听见
+                        await self.context.send_message(umo, MessageChain().message(info))
                     continue
                 await self.context.send_message(
                     umo, MessageChain([AstrImage.fromFileSystem(str(path))])
@@ -1845,6 +1912,7 @@ class TechDigestPlugin(Star):
                 pass
         finally:
             self._running = False
+            await self._drain_pending()
 
     # ------------------------------------------------------------------ 过期清理
     def _prune_old_files(self) -> None:
@@ -1887,7 +1955,8 @@ class TechDigestPlugin(Star):
         alive = {p.name for p in self.images_dir.rglob("*.jpg")}
         cache = self.state.get("images")
         if isinstance(cache, dict) and cache:
-            stale = [k for k in cache if k not in alive]
+            # 缓存键是「兴趣指纹:文件名」，alive 里只有文件名，比对时要去掉前缀
+            stale = [k for k in cache if str(k).split(":", 1)[-1] not in alive]
             for key in stale:
                 cache.pop(key, None)
             if stale:

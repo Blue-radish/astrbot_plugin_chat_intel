@@ -6,6 +6,7 @@ docs/superpowers/specs/2026-11-07-interest-digest-design.md：
 - 兴趣点就是这个群报告的节标题；归不进去的条目落到「其他」。
 """
 
+import re
 from dataclasses import dataclass, field
 
 # 单节最多保留的条目数，超出部分计入"上限截断"
@@ -90,6 +91,7 @@ def _numbered(items: tuple[str, ...]) -> str:
 
 
 _SCHEMA = """{
+  "headline": "一句话概括这段时间这个群在聊什么（不超过 40 字；没有就空字符串）",
   "items": [
     {"msg_no": 12, "want_item": "上面某条兴趣点的原文", "topic": "不超过 12 字",
      "detail": "2-4 句：谁遇到了什么、具体细节（库名/版本/报错原文/命令/方案/链接）、结论",
@@ -157,16 +159,41 @@ def build_vision_prompt(chat: ChatInterest, group_name: str, prev: str, cur: str
     )
 
 
+_PUNCT = re.compile(r"^[\s\d]+[.、,，)）:：]?\s*|[\s。，,、；;：:!！?？~～·…\"'“”‘’()（）\[\]【】]+")
+
+
+def _norm_key(text: str) -> str:
+    """去掉序号、标点、空白，用来容忍模型把 want_item 抄成「1. 复古硬件」或「复古硬件。」。"""
+    return _PUNCT.sub("", str(text or ""))
+
+
 def group_sections(chat: ChatInterest, items: list[dict]) -> tuple[list[tuple[str, list[dict]]], int]:
     """按 want 顺序分节；空节不出现；归不进去的进「其他」；返回 (节, 截断数)。"""
     buckets: dict[str, list[dict]] = {text: [] for text in chat.want}
+    norm_map: dict[str, str] = {}
+    for text in chat.want:
+        norm_map.setdefault(_norm_key(text), text)
     others: list[dict] = []
     for item in items:
         if not isinstance(item, dict):
             continue
         key = str(item.get("want_item") or "").strip()
-        if key in buckets:
-            buckets[key].append(item)
+        target = key if key in buckets else ""
+        if not target:
+            normed = _norm_key(key)
+            if normed:
+                if normed in norm_map:
+                    target = norm_map[normed]
+                else:
+                    best = 0
+                    for want_norm, want_text in norm_map.items():
+                        if not want_norm or len(want_norm) < 2:
+                            continue
+                        if (want_norm in normed or normed in want_norm) and len(want_norm) > best:
+                            best = len(want_norm)
+                            target = want_text
+        if target:
+            buckets[target].append(item)
         else:
             others.append(item)
 

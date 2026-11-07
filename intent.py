@@ -8,8 +8,9 @@
 
 from dataclasses import dataclass
 
-# 明确指向本插件的词
-ANCHOR_STRONG = ("群聊情报", "情报系统", "情报", "日报", "插件")
+# 明确指向本插件的词。注意不含"插件"：B站推送、TTS 也都是插件，
+# 光说"某某插件什么情况"不能算在找群聊情报。
+ANCHOR_STRONG = ("群聊情报", "情报系统", "情报", "日报")
 # 泛指群聊，只在有动作词 + 时间词/群名时才算（由调用方补判）
 ANCHOR_WEAK = ("群聊总结", "群聊", "群", "聊天记录")
 
@@ -33,6 +34,20 @@ ACTIONS = {
 
 # 这四个里，状态与重发必须强指向，否则很容易抢别的功能的话
 REQUIRE_STRONG = ("status", "resend")
+
+# 弱指向（只说"群 / 群聊"）时只认这些明确的"要报告"动作。
+# "有什么""情况"这类太泛，必须配合强指向词，否则「群里今天有什么好玩的」也会触发。
+WEAK_ACTIONS = (
+    "总结",
+    "聊了啥",
+    "聊了什么",
+    "聊了些啥",
+    "讨论了什么",
+    "跑一份",
+    "来一份",
+    "出一份",
+    "生成一份",
+)
 
 # 具体优先：先说"看状态"，再说"重跑/总结"，避免一句话里同时命中时判错
 _ORDER = ("status", "resend", "rerun", "digest")
@@ -73,6 +88,8 @@ def detect_intent(text: str) -> Intent | None:
         if not action:
             continue
         if kind in REQUIRE_STRONG and not strong:
+            continue
+        if not strong and action not in WEAK_ACTIONS:
             continue
         return Intent(kind=kind, anchor=anchor, action=action, strong=strong)
     return None
