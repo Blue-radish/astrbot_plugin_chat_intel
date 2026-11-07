@@ -1,6 +1,6 @@
 // 群聊情报 —— 单页长图模板（Typst）
 // 渲染时会把模板复制到临时任务目录，并把数据写成同目录的 data.json
-// 主体是「话题卡」：topics = [{title, time, members, tags, summary, count}, ...]
+// 主体是「话题卡」：topics = [{title, tags, time, members, parts, images}, ...]
 // 一个话题 = 群友自己聊出来的一件事（不是配置里的主题），兴趣只负责筛。
 #let d = json("data.json")
 
@@ -26,9 +26,7 @@
 #let name-ink = rgb("#7c8aa0")
 
 #let topics = d.at("topics", default: ())
-#let quotes = d.at("quotes", default: ())
 #let stats = d.at("stats", default: (:))
-#let shots = d.at("images", default: ())
 #let headline = d.at("headline", default: "")
 
 #set document(title: d.at("title", default: "群聊情报"))
@@ -114,50 +112,39 @@
         #text(size: 9.5pt, fill: body-ink, t.at("summary", default: ""))
       ]
     ]
-  ]
-]
-
-// ============ 现场图片 ============
-#if shots.len() > 0 [
-  #sec(c2, "现场图片")
-  #grid(
-    columns: if shots.len() == 1 { (1fr,) } else { (1fr, 1fr) },
-    gutter: 8pt,
-    row-gutter: 10pt,
-    ..shots.map(s => block(
-      width: 100%,
-      fill: card,
-      radius: 5pt,
-      inset: 6pt,
-      stroke: 0.5pt + hair,
-    )[
-      #image(s.at("path"), width: 100%, height: 150pt, fit: "contain")
-      #v(3pt)
-      #text(size: 7.5pt, fill: faint, s.at("caption", default: ""))
-    ]),
-  )
-]
-
-// ============ 今日金句 ============
-#if quotes.len() > 0 [
-  #sec(c5, "今日金句")
-  #for q in quotes [
-    #block(width: 100%, fill: card, radius: 5pt, inset: (x: 10pt, y: 8pt), stroke: 0.5pt + hair, below: 6pt)[
-      #text(size: 9.5pt, fill: body-ink, q.at("content", default: ""))
-      #v(3pt)
-      #linebreak()
-      #text(size: 8pt, fill: faint, "—— " + q.at("sender", default: ""))
-      #if q.at("reason", default: "") != "" [
-        #v(2pt)
-        #linebreak()
-        #text(size: 8.5pt, fill: c5, q.at("reason", default: ""))
+    // 这个话题自己的图（最多几张由配置决定）
+    // 竖图不能把整行拉太长：单图 200pt、并排 96pt，等比缩进去居中
+    #let pics = t.at("images", default: ())
+    #if pics.len() > 0 [
+      #block(above: 7pt, below: 0pt)[
+        #grid(
+          columns: if pics.len() == 1 { (1fr,) } else { (1fr, 1fr) },
+          gutter: 6pt,
+          row-gutter: 6pt,
+          ..pics.map(p => block(
+            width: 100%,
+            fill: rgb("#fbfcfe"),
+            radius: 4pt,
+            inset: 4pt,
+            stroke: 0.5pt + hair,
+          )[
+            #image(
+              p.at("path"),
+              width: 100%,
+              height: if pics.len() == 1 { 200pt } else { 96pt },
+              fit: "contain",
+            )
+            #v(2pt)
+            #text(size: 7pt, fill: faint, p.at("caption", default: ""))
+          ]),
+        )
       ]
     ]
   ]
 ]
 
 // ============ 全空兜底 ============
-#if topics.len() + quotes.len() + shots.len() == 0 [
+#if topics.len() == 0 [
   #v(10pt)
   #block(width: 100%, fill: card, radius: 5pt, inset: 14pt, stroke: 0.5pt + hair)[
     #text(size: 10pt, fill: sub, "这段时间群里没有命中这些标签的话题。")

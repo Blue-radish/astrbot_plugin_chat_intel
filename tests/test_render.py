@@ -12,7 +12,6 @@ def _plugin(tmp_path):
         reports_dir=tmp_path,
         ppi=72,
         report_title="群聊情报",
-        keep_quotes=True,
         template=PLUGIN_DIR / "templates" / "report.typ",
         font_dir=str(FONTS),
     )
@@ -26,7 +25,6 @@ def _base():
         "group": "测试群",
         "stats": {"line": "10 条消息 · 2 个话题 · 今天"},
         "headline": "",
-        "quotes": [],
         "footer": "t",
     }
 
@@ -39,6 +37,8 @@ def _topics(count):
             "time": "16:23-16:34",
             "members": "甲、乙",
             "summary": "这是一段完整的讲述。" * 12,
+            "parts": [{"t": "甲", "n": True}, {"t": "：" + "这是一段完整的讲述。" * 12, "n": False}],
+            "images": [],
             "count": 5,
         }
         for i in range(count)
@@ -47,15 +47,15 @@ def _topics(count):
 
 def test_render_handles_zero_topics(tmp_path):
     p = _plugin(tmp_path)
-    path = p._render(dict(_base(), topics=[]), [], "1", "今天")
+    path = p._render(dict(_base(), topics=[]), "1", "今天")
     assert path is not None and path.exists()
 
 
 def test_render_grows_with_topics(tmp_path):
     """话题卡是真的被渲染了：五个话题比零个话题明显更高。"""
     p = _plugin(tmp_path)
-    empty = p._render(dict(_base(), topics=[]), [], "1", "空")
-    many = p._render(dict(_base(), topics=_topics(5)), [], "1", "多")
+    empty = p._render(dict(_base(), topics=[]), "1", "空")
+    many = p._render(dict(_base(), topics=_topics(5)), "1", "多")
     assert empty is not None and many is not None
     with Image.open(empty) as low, Image.open(many) as high:
         assert high.height > low.height + 100, (high.height, low.height)
@@ -64,7 +64,7 @@ def test_render_grows_with_topics(tmp_path):
 def test_render_shows_tags_and_members(tmp_path):
     """话题卡里要有标签、时间、参与人——这些是报告的核心信息。"""
     p = _plugin(tmp_path)
-    path = p._render(dict(_base(), topics=_topics(1)), [], "1", "今天")
+    path = p._render(dict(_base(), topics=_topics(1)), "1", "今天")
     assert path is not None
     assert path.name.startswith("chat_intel_")
 
@@ -120,3 +120,17 @@ def test_describe_topics_exposes_all_nicknames_for_highlighting():
     )
     assert out[0]["names"] == [f"人{i}" for i in range(6)]
     assert "等 6 人" in out[0]["members"]
+
+def test_render_puts_images_under_their_topic(tmp_path):
+    """图跟着话题走：一张图只出现在它所属的话题卡里。"""
+    from PIL import Image as PILImage
+
+    p = _plugin(tmp_path)
+    shot = tmp_path / "shot.png"
+    PILImage.new("RGB", (600, 400), (30, 60, 90)).save(shot)
+    topics = _topics(2)
+    topics[0]["images"] = [{"path": str(shot), "caption": "甲 · 16:30 · 截图"}]
+    path = p._render(dict(_base(), topics=topics), "1", "有图")
+    assert path is not None and path.exists()
+    with PILImage.open(path) as one, PILImage.open(p._render(dict(_base(), topics=_topics(2)), "1", "无图")) as none:
+        assert one.height > none.height + 60, (one.height, none.height)

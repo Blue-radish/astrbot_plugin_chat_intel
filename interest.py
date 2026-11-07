@@ -107,9 +107,6 @@ _SCHEMA = """{
      "title": "能看出是什么事的标题，带型号/数字/对比更好，不超过 22 字",
      "tags": ["从上面「正向标签」里原样挑 1-3 个"],
      "summary": "贴着聊天记录把这件事讲完整：谁先提起、为什么聊起来、中间的关键细节（型号/版本/报错原文/命令/价格/链接/原话），分歧与最后结论。人名直接写记录里的昵称。"}
-  ],
-  "quotes": [
-    {"msg_no": 20, "content": "原文，可截取，不超过 80 字", "sender": "昵称", "reason": "一句话点评为什么值得留"}
   ]
 }"""
 
@@ -128,8 +125,7 @@ _RULES = """硬性规则：
 8. 正文里直接写群友昵称（从记录里照抄，例如「沂水' Yi 说早入职只能填 16 日」），
    不要写「有群友提到」「有人」「大家」这类模糊说法；确实看不出是谁在说，才用「群里」。
 9. 记录里没有的东西绝对不要编造；链接只能照抄记录里出现过的。
-10. quotes 只留真的有意思、有信息量或足够好笑的原话，宁少勿多，没有就返回空数组。
-11. 只输出 JSON 本体，不要 markdown 代码块，不要任何解释文字。"""
+10. 只输出 JSON 本体，不要 markdown 代码块，不要任何解释文字。"""
 
 
 def build_digest_prompt(chat: ChatInterest, group_name: str, window: str, transcript: str) -> str:
@@ -154,18 +150,24 @@ def build_digest_prompt(chat: ChatInterest, group_name: str, window: str, transc
 
 _VISION_SCHEMA = """{"keep": true 或 false, "kind": "截图/电路图/设备照/表情包/照片/聊天截图 等不超过 6 字", "text": "图里的关键文字，最多 24 字，没有就空字符串"}"""
 
+def build_vision_prompt(
+    chat: ChatInterest, group_name: str, prev: str, cur: str, nxt: str, topic: str = ""
+) -> str:
+    """判图用的 user 消息：先给上下文，再给这个群的标签，最后要 JSON。
 
-def build_vision_prompt(chat: ChatInterest, group_name: str, prev: str, cur: str, nxt: str) -> str:
-    """判图用的 user 消息：先给上下文，再给这个群的标签，最后要 JSON。"""
+    `topic` 是这张图所在话题的标题：有它，模型才知道这张图是配着哪件事发出来的。
+    """
     pos_block = _bullets(chat.tags_pos) if chat.tags_pos else "（未配置：按「有信息量、能看懂内容」的尺度判断）"
     neg_block = _bullets(chat.tags_neg) if chat.tags_neg else "（无）"
+    topic_line = f"这张图出现在话题「{topic}」里。\n" if topic else ""
     return (
-        f"这是群「{group_name}」里的一张图，发送时前后文如下。\n\n"
+        f"这是群「{group_name}」里的一张图，发送时前后文如下。\n"
+        f"{topic_line}\n"
         f"上文：{prev or '（无）'}\n"
         f"本条文字：{cur or '（无文字，纯图片）'}\n"
         f"下文：{nxt or '（无）'}\n\n"
         "———— 以下是要你做的事 ————\n\n"
-        "看图，判断这张图是否跟这个群关心的内容有关。\n\n"
+        "看图，判断这张图是否值得放进这个群的报告里。\n\n"
         f"这个群关心的正向标签：\n{pos_block}\n\n"
         f"这个群不要的负向标签：\n{neg_block}\n\n"
         "判断标准：\n"

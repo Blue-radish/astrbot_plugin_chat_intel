@@ -71,8 +71,8 @@
   },
   "max_images": {
     "type": "int",
-    "description": "每份报告最多放几张图",
-    "default": 6
+      "description": "每个话题最多放几张图",
+      "default": 4
   },
   "max_image_mb": {
     "type": "int",
@@ -112,11 +112,6 @@
     "description": "推送目标会话 unified_msg_origin",
     "default": "",
     "hint": "格式 <平台id>:FriendMessage:<QQ号>，例如 mybot:FriendMessage:10001"
-  },
-  "keep_quotes": {
-    "type": "bool",
-    "description": "是否保留「今日圣经」金句板块",
-    "default": true
   },
   "report_title": {
     "type": "string",

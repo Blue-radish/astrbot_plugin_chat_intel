@@ -66,7 +66,10 @@ except Exception:  # pragma: no cover - 没装就退化成原文匹配
     _zh_convert = None
 
 # 报告里各板块的条数上限（合并多个分片后仍要克制）
-CAP_QUOTES = 4
+# 每个话题最多问几张图（问得越多越贵，缓存会挡住重复判定）
+PER_TOPIC_ASK = 6
+# 一次生成最多问几张图（跨话题总量，第一次跑没有缓存时的花费上限）
+MAX_JUDGE_PER_RUN = 30
 
 IMG_CACHE_VERSION = 4  # 判据说辞/判据维度变化时 +1，旧缓存作废（4：判图改用每群兴趣）
 
@@ -119,7 +122,7 @@ TECH_HINTS = (
 
 SYSTEM_PROMPT = """你在给群友写一份私人情报简报。文字克制、具体、可执行。"""
 
-@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递", "2.1.1")
+@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递", "2.2.0")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -140,7 +143,6 @@ class TechDigestPlugin(Star):
         self.daily_time = str(self.config.get("daily_time") or "").strip()
         self.push_enabled = self._as_bool(self.config.get("push_enabled"), False)
         self.push_umo = str(self.config.get("push_umo") or "").strip()
-        self.keep_quotes = self._as_bool(self.config.get("keep_quotes"), True)
         self.report_title = str(self.config.get("report_title") or "群聊情报").strip()
         try:
             self.ppi = max(72, int(self.config.get("render_ppi") or 180))
@@ -1127,41 +1129,19 @@ class TechDigestPlugin(Star):
         return out
 
     def _merge_parts(self, parts: list[dict], chat: ChatInterest) -> dict:
-        """合并各分片的话题：跨块重复的并成一条，金句去重。"""
+        """合并各分片的话题：跨块重复的并成一条。"""
         headline = ""
         topic_groups: list[list[dict]] = []
-        quotes: list[dict] = []
-        seen_quotes: set[str] = set()
-
         for part in parts:
             if not isinstance(part, dict):
                 continue
             if not headline:
                 headline = str(part.get("headline") or "").strip()
             topic_groups.append(part.get("topics") or [])
-            for quote in part.get("quotes") or []:
-                if not isinstance(quote, dict):
-                    continue
-                content = str(quote.get("content") or "").strip()
-                if not content or content[:24] in seen_quotes:
-                    continue
-                seen_quotes.add(content[:24])
-                quotes.append(
-                    {
-                        "content": content,
-                        "sender": str(quote.get("sender") or "").strip(),
-                        "reason": str(quote.get("reason") or "").strip(),
-                    }
-                )
-
-        return {
-            "headline": headline,
-            "topics": merge_topics(chat, topic_groups),
-            "quotes": quotes[:CAP_QUOTES],
-        }
+        return {"headline": headline, "topics": merge_topics(chat, topic_groups)}
 
     @staticmethod
-    def _payload_topics(topics: list[dict]) -> list[dict]:
+    def _payload_topics(topics: list[dict], images: dict[int, list[dict]] | None = None) -> list[dict]:
         """交给模板的话题结构。
 
         - tags 必须保持成数组：模板按数组逐个渲染标签，一旦在 Python 侧拼成「甲、乙」字符串，
@@ -1185,6 +1165,7 @@ class TechDigestPlugin(Star):
                     "members": str(topic.get("members") or ""),
                     "summary": summary,
                     "parts": split_names(summary, topic.get("names") or []),
+                    "images": list((images or {}).get(len(out), [])),
                     "count": int(topic.get("count") or 0),
                 }
             )
@@ -1207,6 +1188,7 @@ class TechDigestPlugin(Star):
                     "title": topic.get("title") or "",
                     "tags": topic.get("tags") or [],
                     "summary": topic.get("summary") or "",
+                    "msg_nos": nums,
                     "time": topic_time_range([int(r.get("t") or 0) for r in picked]),
                     "members": topic_members(names),
                     "names": names,  # 完整名单，正文高亮用（members 会给「等 N 人」截断）
@@ -1258,24 +1240,85 @@ class TechDigestPlugin(Star):
         # 本条没字，但前后在聊技术：只留很大的图（截图、图表通常很大）
         return any(hint in ctx for hint in TECH_HINTS) and max(width, height) >= 800
 
-    async def _select_images(self, records: list[dict], chat: ChatInterest) -> list[dict]:
-        """有视觉模型就让它按这个群的兴趣看图；没有才退回尺寸/文字规则。"""
-        if not self.include_images or self.max_images <= 0:
-            return []
-        candidates = self._image_candidates(records)
-        if not candidates:
-            return []
+    async def _images_for_topics(
+        self, records: list[dict], topics: list[dict], chat: ChatInterest
+    ) -> dict[int, list[dict]]:
+        """把图分给话题：只挑话题自己引用的那些消息里的图，每个话题最多 max_images 张。
+
+        顺序：先按话题收集候选（最近 PER_TOPIC_ASK 张），跨话题总量封顶 MAX_JUDGE_PER_RUN 张，
+        再交给视觉模型判一次（结论带缓存），最后按话题挑回前 max_images 张。
+        """
+        if not self.include_images or self.max_images <= 0 or not topics:
+            return {}
+        by_idx = {cand["idx"]: cand for cand in self._image_candidates(records)}
+        if not by_idx:
+            return {}
+
+        # 每个话题自己的候选：话题引用到的编号，加上这些编号跨度内的图
+        # （模型经常不引用纯「[图]」那一行，所以按跨度取，一张图只归一个话题）
+        per_topic: list[list[dict]] = []
+        claimed: set[int] = set()
+        for topic in topics:
+            nums = sorted({n for n in topic.get("msg_nos") or [] if 0 <= n < len(records)})
+            if not nums:
+                per_topic.append([])
+                continue
+            lo, hi = nums[0], nums[-1]
+            own = [
+                i
+                for i in sorted(by_idx)
+                if (i in nums or lo <= i <= hi) and i not in claimed
+            ]
+            claimed.update(own)
+            per_topic.append(
+                [
+                    dict(by_idx[i], topic=topic.get("title") or "")
+                    for i in own[-PER_TOPIC_ASK:]
+                ]
+            )
+        logger.info(
+            f"[{PLUGIN_NAME}] 图分配：{len(by_idx)} 张带图消息，各话题命中 "
+            f"{[len(x) for x in per_topic]}"
+        )
+
+        # 去重后按「每个话题轮流取一张」拼成待判列表，避免某个大话题把所有额度吃光
+        picked: list[dict] = []
+        seen: set[int] = set()
+        depth = max((len(x) for x in per_topic), default=0)
+        for level in range(depth):
+            for bucket in per_topic:
+                if level >= len(bucket):
+                    continue
+                cand = bucket[level]
+                if cand["idx"] in seen:
+                    continue
+                seen.add(cand["idx"])
+                picked.append(cand)
+                if len(picked) >= MAX_JUDGE_PER_RUN:
+                    break
+            if len(picked) >= MAX_JUDGE_PER_RUN:
+                break
+        if not picked:
+            return {}
+
         provider = self._get_vision_provider()
         if provider is not None:
-            kept = await self._vision_picks(provider, candidates, chat)
+            kept = await self._vision_picks(provider, picked, chat)
         else:
-            kept = await self._rule_picks(candidates, chat)
-        if not kept:
-            return []
-        kept.sort(key=lambda c: int(c["rec"].get("t") or 0))
-        return [self._image_entry(c) for c in kept[: self.max_images]]
+            kept = await self._rule_picks(picked, chat)
+        keep_idx = {cand["idx"] for cand in kept}
+        if not keep_idx:
+            return {}
+
+        out: dict[int, list[dict]] = {}
+        for i, bucket in enumerate(per_topic):
+            chosen = [cand for cand in bucket if cand["idx"] in keep_idx][: self.max_images]
+            if chosen:
+                out[i] = [self._image_entry(cand) for cand in chosen]
+        return out
 
     def _image_candidates(self, records: list[dict]) -> list[dict]:
+        """挑出带图的消息，连同它前后两条的文字，供判图用。idx 消息在 records 里的下标。"""
         candidates: list[dict] = []
         for idx, rec in enumerate(records):
             files = [
@@ -1287,6 +1330,7 @@ class TechDigestPlugin(Star):
                 continue
             candidates.append(
                 {
+                    "idx": idx,
                     "rec": rec,
                     "files": files,
                     "prev": str(records[idx - 1].get("text") or "") if idx > 0 else "",
@@ -1295,10 +1339,10 @@ class TechDigestPlugin(Star):
                     else "",
                 }
             )
-        return candidates[-20:]  # 太多图就别全问了，取最近的 20 条
+        return candidates
 
     def _image_cache_key(self, chat: ChatInterest, path: Path) -> str:
-        """判图缓存键：兴趣指纹 + 文件名。换群或改了兴趣就重新判。"""
+        """判图缓存键：标签指纹 + 文件名。换群或改了标签就重新判。"""
         return f"{interest_fingerprint(chat)}:{path.name}"
 
     def _reset_image_cache_if_stale(self) -> None:
@@ -1347,7 +1391,7 @@ class TechDigestPlugin(Star):
         )
         if dropped and len(dropped) <= 8:
             logger.info(f"[{PLUGIN_NAME}] 丢弃明细: {'; '.join(dropped)}")
-        return kept[-self.max_images :]
+        return kept
 
     async def _rule_picks(self, candidates: list[dict], chat: ChatInterest) -> list[dict]:
         """没有视觉模型时的退路：尺寸/形状 + 文字线索，再让模型看上下文做减法。"""
@@ -1360,7 +1404,7 @@ class TechDigestPlugin(Star):
                 filtered.append(cand)
         if not filtered:
             return []
-        filtered = filtered[-12:]
+        filtered = filtered[: len(filtered)]
         picks = await self._ask_which_images(filtered, chat)
         if picks is None:
             picks = self._heuristic_image_picks(filtered, chat)
@@ -1396,6 +1440,7 @@ class TechDigestPlugin(Star):
                     str(cand.get("prev") or ""),
                     str((cand.get("rec") or {}).get("text") or ""),
                     str(cand.get("next") or ""),
+                    str(cand.get("topic") or ""),
                 ),
                 image_urls=[str(path)],
                 contexts=[],
@@ -1504,7 +1549,7 @@ class TechDigestPlugin(Star):
         return [i for _score, i in scored]
 
     # ------------------------------------------------------------------ 渲染
-    def _render(self, payload: dict, images: list[dict], gid: str, label: str) -> Path | None:
+    def _render(self, payload: dict, gid: str, label: str) -> Path | None:
         try:
             import typst
         except ImportError:
@@ -1519,18 +1564,25 @@ class TechDigestPlugin(Star):
             shutil.copyfile(self.template, job / "main.typ")
             img_dir = job / "img"
             img_dir.mkdir(exist_ok=True)
-            payload["images"] = []
-            for i, img in enumerate(images):
-                src = Path(img["path"])
-                ext = src.suffix.lower() or ".jpg"
-                dst = img_dir / f"{i}{ext}"
-                try:
-                    shutil.copyfile(src, dst)
-                except Exception:
-                    continue
-                payload["images"].append(
-                    {"path": f"img/{dst.name}", "caption": img["caption"]}
-                )
+            # 图片是挂在各个话题下面的，排版时按话题把文件复制进临时目录并改写路径
+            seq = 0
+            for topic in payload.get("topics") or []:
+                copies: list[dict] = []
+                for img in topic.get("images") or []:
+                    src = Path(img.get("path") or "")
+                    if not src.is_file():
+                        continue
+                    ext = src.suffix.lower() or ".jpg"
+                    dst = img_dir / f"{seq}{ext}"
+                    try:
+                        shutil.copyfile(src, dst)
+                    except Exception:
+                        continue
+                    seq += 1
+                    copies.append(
+                        {"path": f"img/{dst.name}", "caption": img.get("caption") or ""}
+                    )
+                topic["images"] = copies
             (job / "data.json").write_text(
                 json.dumps(payload, ensure_ascii=False), encoding="utf-8"
             )
@@ -1602,15 +1654,13 @@ class TechDigestPlugin(Star):
             return None, f"{group_name}：模型没有给出可用的结构化结果", True
 
         data = self._merge_parts(parts, chat)
-        quotes = data.get("quotes") or []
-        if not self.keep_quotes:
-            quotes = []
 
         topics = self._describe_topics(data.get("topics") or [], records)
         if not topics:
             return None, f"{group_name}：{label}没有命中标签的话题", False
 
-        images = await self._select_images(records, chat)
+        topic_images = await self._images_for_topics(records, topics, chat)
+        image_count = sum(len(v) for v in topic_images.values())
 
         now = datetime.now()
         payload = {
@@ -1621,12 +1671,11 @@ class TechDigestPlugin(Star):
                 "line": f"{len(records)} 条消息 · {len(topics)} 个话题 · {label}",
             },
             "headline": str(data.get("headline") or "").strip(),
-            "topics": self._payload_topics(topics),
-            "quotes": self._norm_list(quotes, ("content", "sender", "reason")),
+            "topics": self._payload_topics(topics, topic_images),
             "footer": f"生成于 {now:%Y-%m-%d %H:%M} · {PLUGIN_NAME} · 本报告不会发到群里",
         }
 
-        path = self._render(payload, images, gid, label)
+        path = self._render(payload, gid, label)
         if path is None:
             return None, f"{group_name}：排版成图失败，看日志", True
 
@@ -1640,7 +1689,7 @@ class TechDigestPlugin(Star):
         ) or "无"
         info = (
             f"[{group_name}] {label}：{len(records)} 条 / {len(topics)} 个话题"
-            f"（标签 {tag_desc}）· 金句 {len(payload['quotes'])} · 图 {len(payload['images'])}"
+            f"（标签 {tag_desc}）· 图 {image_count}"
             + (f" · {len(chunks)} 段" if len(chunks) > 1 else "")
         )
         logger.info(f"[{PLUGIN_NAME}] {info} -> {path.name}")

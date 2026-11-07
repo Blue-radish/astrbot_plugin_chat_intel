@@ -42,7 +42,7 @@ def make_plugin(**attrs):
     p.include_images = attrs.pop("include_images", True)
     p.max_images = attrs.pop("max_images", 6)
     p.max_messages = attrs.pop("max_messages", 10000)
-    p.keep_quotes = attrs.pop("keep_quotes", True)
+    p.keep_quotes_unused = attrs.pop("keep_quotes_unused", True)
     p.report_title = attrs.pop("report_title", "群聊情报")
     p.render_ppi = attrs.pop("render_ppi", 72)
     p.font_dir = attrs.pop("font_dir", "")

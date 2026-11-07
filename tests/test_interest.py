@@ -60,7 +60,7 @@ def test_prompt_puts_rules_after_transcript():
     assert "手机开箱" in prompt
     assert '"topics"' in prompt
     assert '"msg_nos"' in prompt
-    assert "quotes" in prompt
+    assert "锐评" not in prompt
 
 
 def test_prompt_asks_for_complete_narrative():
@@ -74,9 +74,10 @@ def test_prompt_asks_for_complete_narrative():
 
 def test_vision_prompt_uses_tags():
     chat = ChatInterest("1", "p", ("复古硬件",), ("手机开箱",), "", "")
-    prompt = build_vision_prompt(chat, "古董群", "上文", "看图", "下文")
+    prompt = build_vision_prompt(chat, "古董群", "上文", "看图", "下文", "386 主板不亮机")
     assert "复古硬件" in prompt and "手机开箱" in prompt
     assert "这个群关心的正向标签" in prompt
+    assert "386 主板不亮机" in prompt
 
 
 def test_topics_keep_only_configured_tags():
