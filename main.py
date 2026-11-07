@@ -85,6 +85,7 @@ MAX_JUDGE_PER_RUN = 30
 IMG_CACHE_VERSION = 4  # 判据说辞/判据维度变化时 +1，旧缓存作废（4：判图改用每群兴趣）
 
 CHUNK_CHARS = 55000  # 单次喂给模型的转录上限，超了切片后合并
+MSG_TEXT_CAP = 800  # 单条消息保留多少字（含换行）；超了截断并留标记
 
 ARG_PROMPT = """把用户这句话里的「时间范围」和「群」抽出来，只输出 JSON：
 {"date": "", "group": ""}
@@ -133,7 +134,7 @@ TECH_HINTS = (
 
 SYSTEM_PROMPT = """你在给群友写一份私人情报简报。文字克制、具体、可执行。"""
 
-@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递", "2.2.4")
+@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递", "2.2.5")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -808,7 +809,7 @@ class TechDigestPlugin(Star):
             uid = str(event.get_sender_id() or "")
             if not uid or uid in self.ignore_uids:
                 return
-            text = re.sub(r"\s+", " ", (event.message_str or "")).strip()
+            text = self._cap_text(event.message_str or "")
 
             images: list[str] = []
             if self.include_images and self.max_images > 0:
@@ -1087,16 +1088,38 @@ class TechDigestPlugin(Star):
             "gid": gid,
             "uid": str(msg.get("user_id") or ""),
             "name": str(sender.get("card") or sender.get("nickname") or "")[:16],
-            "text": self._msg_text(msg)[:280],
+            "text": self._cap_text(self._msg_text(msg)),
             "mid": str(msg.get("message_id") or msg.get("real_id") or ""),
         }
         return record
+
+    @classmethod
+    def _cap_text(cls, text: str) -> str:
+        """保留原文的换行与缩进（命令、代码、报错靠它才看得懂），只在真超长时截断并标记。"""
+        raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+        lines = [line.rstrip() for line in raw.split("\n")]
+        # 连续空行压成一个，避免整屏空白占满预算
+        cleaned: list[str] = []
+        blank = False
+        for line in lines:
+            if not line.strip():
+                if blank:
+                    continue
+                blank = True
+                cleaned.append("")
+            else:
+                blank = False
+                cleaned.append(line)
+        text_out = "\n".join(cleaned).strip()
+        if len(text_out) > MSG_TEXT_CAP:
+            return text_out[:MSG_TEXT_CAP] + " …（过长已截断）"
+        return text_out
 
     @staticmethod
     def _msg_text(msg: dict) -> str:
         segments = msg.get("message")
         if isinstance(segments, str):
-            return re.sub(r"\s+", " ", segments).strip()
+            return segments
         parts: list[str] = []
         for seg in segments or []:
             if not isinstance(seg, dict):
@@ -1119,7 +1142,7 @@ class TechDigestPlugin(Star):
                 parts.append("[聊天记录]")
             else:
                 parts.append(f"[{stype}]")
-        return re.sub(r"\s+", " ", "".join(parts)).strip()
+        return "".join(parts).strip()
 
     async def _group_name(self, gid: str) -> str:
         """群名自动检测。报告图里只用群名，文字回复里会带群号。"""
@@ -1353,7 +1376,19 @@ class TechDigestPlugin(Star):
         return until - self.days * 86400
 
     # ------------------------------------------------------------------ 抽取
+    @staticmethod
+    def _stamp(ts: int, multi_day: bool) -> str:
+        """跨天的记录要带日期，否则「第二天验证」这种后续完全对不上号。"""
+        moment = datetime.fromtimestamp(ts)
+        return moment.strftime("%m-%d %H:%M") if multi_day else moment.strftime("%H:%M")
+
     def _build_transcript(self, records: list[dict]) -> tuple[str, int, int]:
+        days = {
+            datetime.fromtimestamp(int(rec.get("t") or 0)).date()
+            for rec in records
+            if rec.get("t")
+        }
+        multi_day = len(days) > 1
         lines: list[str] = []
         senders: set[str] = set()
         for idx, rec in enumerate(records):
@@ -1368,7 +1403,7 @@ class TechDigestPlugin(Star):
                 continue
             name = str(rec.get("name") or uid)[:16]
             ts = int(rec.get("t") or 0)
-            stamp = datetime.fromtimestamp(ts).strftime("%H:%M") if ts else "--:--"
+            stamp = self._stamp(ts, multi_day) if ts else "--:--"
             body = text if text else "[图]"
             if has_img and "[图]" not in body:
                 body += " [图]"
@@ -1475,7 +1510,7 @@ class TechDigestPlugin(Star):
         return out
 
     def _merge_parts(self, parts: list[dict], chat: ChatInterest) -> dict:
-        """合并各分片的话题：跨块重复的并成一条。"""
+        """合并各分片的话题：跨块重复的并成一条，总览按最终留下的话题生成。"""
         headline = ""
         topic_groups: list[list[dict]] = []
         for part in parts:
@@ -1484,7 +1519,23 @@ class TechDigestPlugin(Star):
             if not headline:
                 headline = str(part.get("headline") or "").strip()
             topic_groups.append(part.get("topics") or [])
-        return {"headline": headline, "topics": merge_topics(chat, topic_groups)}
+        topics = merge_topics(chat, topic_groups)
+        return {"headline": self._make_headline(headline, topics), "topics": topics}
+
+    @staticmethod
+    def _make_headline(model_headline: str, topics: list[dict]) -> str:
+        """总览要覆盖整份报告：单个话题直接用模型那句，多个话题按标题列出来。
+
+        之前是「取第一个非空分片的 headline」，多分片时它只描述第一块内容。
+        """
+        titles = [str(t.get("title") or "").strip() for t in topics if t.get("title")]
+        if not titles:
+            return model_headline
+        if len(titles) == 1:
+            return model_headline or titles[0]
+        shown = "、".join(titles[:3])
+        more = f" 等 {len(titles)} 个话题" if len(titles) > 3 else ""
+        return f"这段时间主要在聊 {shown}{more}"
 
     @staticmethod
     def _payload_topics(topics: list[dict], images: dict[int, list[dict]] | None = None) -> list[dict]:

@@ -68,8 +68,10 @@ def test_prompt_asks_for_complete_narrative():
     chat = ChatInterest("1", "p", ("复古硬件",), (), "", "")
     prompt = build_digest_prompt(chat, "古董群", "今天", "#1 甲: hi")
     assert "一个话题 = 群友围绕同一件事来回聊的一段" in prompt
-    assert "300-600 字" in prompt
-    assert "80-150 字" in prompt
+    # 篇幅按信息量决定，不给固定字数指标（避免模型凑字数或补写背景）
+    assert "篇幅按原始信息量决定" in prompt
+    assert "不要凑字数" in prompt
+    assert "300-600" not in prompt and "80-150" not in prompt
 
 
 def test_vision_prompt_uses_tags():
@@ -92,7 +94,7 @@ def test_topics_keep_only_configured_tags():
     assert out[0]["tags"] == ["电脑"]
 
 
-def test_topics_sorted_by_message_count_and_deduped():
+def test_topics_keep_model_order_and_dedupe():
     chat = ChatInterest("1", "p", ("电脑",), (), "", "")
     topics = [
         {"title": "小事", "tags": ["电脑"], "msg_nos": [1], "summary": "短。"},
@@ -100,8 +102,9 @@ def test_topics_sorted_by_message_count_and_deduped():
         {"title": "1. 大事", "tags": ["电脑"], "msg_nos": [13], "summary": "长的更长的版本。"},
     ]
     out = normalize_topics(chat, topics)
-    assert [t["title"] for t in out] == ["大事", "小事"]
-    assert out[0]["msg_nos"] == [10, 11, 12, 13]
+    # 顺序保留模型给的（它按信息量排），不再按引用条数重排
+    assert [t["title"] for t in out] == ["小事", "大事"]
+    assert out[1]["msg_nos"] == [10, 11, 12, 13]
 
 
 def test_topics_drop_entries_without_numbers_or_summary():
@@ -115,12 +118,17 @@ def test_topics_drop_entries_without_numbers_or_summary():
 
 def test_merge_topics_joins_same_story_across_chunks():
     chat = ChatInterest("1", "p", ("电脑",), (), "", "")
-    chunk1 = [{"title": "装黑苹果翻车", "tags": ["电脑"], "msg_nos": [1, 2, 3], "summary": "前半段。"}]
-    chunk2 = [{"title": "装黑苹果翻车", "tags": ["电脑"], "msg_nos": [4, 5], "summary": "前半段，补上后半段。"}]
+    chunk1 = [
+        {"title": "装黑苹果翻车", "tags": ["电脑"], "msg_nos": [1, 2, 3], "summary": "要先降 BIOS 版本。"}
+    ]
+    chunk2 = [
+        {"title": "装黑苹果翻车", "tags": ["电脑"], "msg_nos": [4, 5], "summary": "降完能进系统了。"}
+    ]
     merged = merge_topics(chat, [chunk1, chunk2])
     assert len(merged) == 1
     assert merged[0]["msg_nos"] == [1, 2, 3, 4, 5]
-    assert merged[0]["summary"] == "前半段，补上后半段。"
+    # 两段互补时都要保留，不能只留更长的那份
+    assert "降 BIOS" in merged[0]["summary"] and "能进系统" in merged[0]["summary"]
 
 
 def test_topic_time_range():
@@ -142,7 +150,7 @@ def test_prompt_demands_rich_detail_and_real_nicknames():
     """正文要贴着原文写、直接点名，不要「有群友提到」这种模糊说法。"""
     chat = ChatInterest("1", "p", ("复古硬件",), (), "", "")
     prompt = build_digest_prompt(chat, "古董群", "今天", "#1 甲: hi")
-    assert "300-600" in prompt
+    assert "原话、命令、报错、链接照抄" in prompt
     assert "有群友提到" in prompt  # 作为反例出现在规则里
     assert "群友昵称" in prompt
 
