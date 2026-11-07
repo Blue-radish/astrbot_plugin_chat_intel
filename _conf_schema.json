@@ -53,6 +53,18 @@
     "default": 7,
     "hint": "超期的 messages/*.jsonl、images/日期目录、reports 里的旧图会被自动清掉"
   },
+  "smart_parse": {
+    "type": "bool",
+    "description": "命令参数认不出来时，用模型兜底解析",
+    "default": true,
+    "hint": "例如「三天以内的」这种规则认不出的说法，会额外问一次模型；关掉可省一次调用"
+  },
+  "owner_uids": {
+    "type": "string",
+    "description": "允许调用日报工具的 QQ 号，逗号分隔",
+    "default": "",
+    "hint": "留空表示任何私聊都能触发；填了就只有这些号能用。群里无论怎么问都不会发报告"
+  },
   "daily_time": {
     "type": "string",
     "description": "每天自动生成的时间（HH:MM），留空则不定时；只总结上次之后的新消息",

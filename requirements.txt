@@ -1,1 +1,2 @@
 typst>=0.13
+zhconv>=1.4

@@ -30,6 +30,12 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_tech_digest"
 
+
+try:  # 简繁归一化：群名可能是繁体，用户打的是简体
+    from zhconv import convert as _zh_convert
+except Exception:  # pragma: no cover - 没装就退化成原文匹配
+    _zh_convert = None
+
 # 报告里各板块的条数上限（合并多个分片后仍要克制）
 CAP_TOPICS = 8
 CAP_TOOLS = 10
@@ -40,6 +46,17 @@ CAP_QUOTES = 4
 IMG_CACHE_VERSION = 3  # 判据说辞变化时 +1，旧缓存作废
 
 CHUNK_CHARS = 55000  # 单次喂给模型的转录上限，超了切片后合并
+
+ARG_PROMPT = """把用户这句话里的「时间范围」和「群」抽出来，只输出 JSON：
+{"date": "", "group": ""}
+
+date 写成这些形式之一：今天 / 昨天 / 前天 / 大前天 / 本周 / 上周 / 最近3天 / 3天前 / 2026-11-05。
+没提到时间就留空字符串（表示"只看没看过的"）。
+
+group 写群名里最有辨识度的一小段（例如"考古"），没提到群就留空字符串。
+不要解释、不要代码块。
+
+用户的话：{text}"""
 
 VISION_PROMPT = """这是群聊里出现的一张图片。判断它作为「技术情报」的配图有没有保留价值。
 
@@ -137,7 +154,7 @@ USER_PROMPT_TEMPLATE = """下面是群「{group}」在 {window} 的聊天记录�
 {transcript}"""
 
 
-@register(PLUGIN_NAME, "Ray", "多群技术情报日报：只留技术向内容，视觉模型筛图，本地排版成图，静默私聊投递", "1.2.1")
+@register(PLUGIN_NAME, "Ray", "多群技术情报日报：只留技术向内容，视觉模型筛图，本地排版成图，静默私聊投递", "1.2.2")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -176,6 +193,10 @@ class TechDigestPlugin(Star):
             self.keep_days = max(1, int(self.config.get("keep_days") or 7))
         except (TypeError, ValueError):
             self.keep_days = 7
+        self.smart_parse = self._as_bool(self.config.get("smart_parse"), True)
+
+        owners = str(self.config.get("owner_uids") or "")
+        self.owner_uids = {u.strip() for u in re.split(r"[,，\s]+", owners) if u.strip()}
 
         ignore = str(self.config.get("ignore_uids") or "")
         self.ignore_uids = {u.strip() for u in ignore.split(",") if u.strip()}
@@ -328,11 +349,64 @@ class TechDigestPlugin(Star):
             )
         event.stop_event()
 
+    # ------------------------------------------------------------------ 大白话直通
+    _STRONG_INTENT = re.compile(
+        r"(群聊总结|群聊日报|技术日报|技术总结|日报|聊了啥|聊了什么|聊了些啥|群里聊|群聊内容|群聊记录)"
+    )
+    _SUBJECT = re.compile(r"(群|群聊|聊天记录)")
+    _ASK = re.compile(r"(总结|统计|整理|汇总|有哪些|有什么|说了什么|讨论了什么|聊)")
+    _TIME = re.compile(
+        r"(今天|今日|昨天|昨日|前天|大前天|最近|本周|这周|上周|\d+\s*天前|\d{1,2}\s*月|\d{4}-\d{1,2})"
+    )
+
+    def _digest_intent(self, text: str) -> bool:
+        """判断这句话是不是在要群聊总结。宁可漏，不要误触发。"""
+        text = text or ""
+        if self._STRONG_INTENT.search(text):
+            return True
+        if not self._SUBJECT.search(text):
+            return False
+        return bool(self._ASK.search(text) or self._TIME.search(text))
+
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=900)
+    async def intercept_digest_intent(self, event: AstrMessageEvent):
+        """私聊里用大白话要总结时直接出报告，不赌模型会不会调工具。"""
+        if not self._tool_allowed(event):
+            return
+        text = (event.message_str or "").strip()
+        if not text or text.startswith(("/", "／", "#")):
+            return
+        if not self._digest_intent(text):
+            return
+        if self._running or not self.group_ids:
+            return
+        if any(k in text for k in ("重发", "再发", "状态", "配置")):
+            return
+        for gid in self.group_ids:
+            await self._group_name(gid)
+        rng, gid, _rest = self._resolve_request(text)
+        event.stop_event()  # 模型这段就别开口了
+        logger.info(
+            f"[{PLUGIN_NAME}] 大白话直通：范围={rng[2]} 群={gid or '全部'} 原文「{text}」"
+        )
+        asyncio.create_task(
+            self._generate_and_send(event.unified_msg_origin, *rng, gid)
+        )
+
     @filter.on_llm_request()
     async def silence_llm(self, event: AstrMessageEvent, req: ProviderRequest) -> bool:
         """第二道闸：即使事件绕过 stop_event（例如 @ 唤醒），也不让模型出手。"""
         platform_id = self._platform_of(event)
         if platform_id not in self.silence_platforms:
+            # 这里放行，但要明确告诉模型：涉及群聊内容就调工具，别自己编
+            if self._tool_allowed(event) and self.group_ids:
+                hint = (
+                    "\n\n[工具使用规则] 当用户想了解被监控群聊里聊了什么、想看技术话题、"
+                    "要日报或群聊总结时，必须调用 group_digest 工具（when=时间，group=群名片段，"
+                    "都留空表示只看没看过的全部群）。你本身拿不到群聊原文，不要凭记忆或想象回答，"
+                    "也不要说自己看不到群消息。调用工具后不要再输出文字。"
+                )
+                req.system_prompt = (req.system_prompt or "") + hint
             return False
         self._llm_blocked += 1
         if self._llm_blocked <= 5 or self._llm_blocked % 100 == 0:
@@ -344,6 +418,12 @@ class TechDigestPlugin(Star):
     @filter.on_decorating_result()
     async def silence_result(self, event: AstrMessageEvent):
         """第三道闸：回复已经生成也不发出去。"""
+        # 工具已经自己把报告图发出去了，模型这句「好的我帮你生成」就不要再发了
+        if event.get_extra("tech_digest_tool_sent"):
+            result = event.get_result()
+            if result is not None and getattr(result, "chain", None):
+                result.chain = []
+            return
         platform_id = self._platform_of(event)
         if platform_id not in self.silence_platforms:
             return
@@ -659,65 +739,192 @@ class TechDigestPlugin(Star):
         return "群聊"
 
     # ------------------------------------------------------------------ 时间范围
-    def _parse_range(self, arg: str) -> tuple[float, float, str, bool]:
-        """返回 (since, until, 界面显示的范围名, 是否增量模式)。"""
+    # ------------------------------------------------------------------ 宽松解析
+    # 命令后面的参数不要求固定格式：从一整句里抠出「时间范围」和「群」，
+    # 抠不干净的碎片再交给模型兜底（smart_parse），所以这些说法都成立：
+    #   /群聊总结 今天 考古      /群聊总结 今天的考古群      /群聊总结 2026年11月5日
+    #   /群聊总结 帮我看看昨天考古群聊了啥                /群聊总结 最近3天
+    _STOPWORDS = (
+        "帮我", "帮忙", "给我", "麻烦", "顺便", "辛苦", "请", "看一下", "看看", "看下", "瞧",
+        "总结", "统计", "整理", "生成", "输出", "来一份", "一份", "一个", "报告", "日报",
+        "群聊", "群里", "聊天记录", "聊天", "消息", "记录", "内容", "讨论", "啥", "什么",
+        "怎么样", "如何", "关于", "里面", "里的", "那波", "这波",
+        "的", "群", "里", "在", "和", "跟", "再", "来", "份", "那", "这", "把", "给",
+        "了", "吧", "啊", "呢", "呀", "吗", "一下",
+        "。", "，", "、", "？", "！", "；", "：", " ", "\t",
+    )
+
+    def _clean_text(self, text: str) -> str:
+        out = text or ""
+        for word in sorted(self._STOPWORDS, key=len, reverse=True):
+            out = out.replace(word, " ")
+        return re.sub(r"\s+", " ", out).strip(" .,:;!?")
+
+    def _match_range(self, text: str):
+        """在整句里找时间表达，返回 ((since, until, label, incremental), 命中的原文)。"""
         now = time.time()
         today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        arg = (arg or "").strip()
+        text = text or ""
 
-        if not arg:
-            return 0.0, now, "最新消息", True
-
-        def day_bounds(day: datetime, label: str):
+        def from_day(day: datetime, matched: str):
             start = day.timestamp()
-            end = (day + timedelta(days=1)).timestamp()
-            return start, min(end, now), label, False
+            stop = (day + timedelta(days=1)).timestamp()
+            return (start, min(stop, now), f"{day:%Y-%m-%d}", False), matched
 
-        if arg in ("今天", "今日", "today"):
-            return day_bounds(today, "今天")
-        if arg in ("昨天", "昨日", "yesterday"):
-            return day_bounds(today - timedelta(days=1), "昨天")
-        if arg in ("前天",):
-            return day_bounds(today - timedelta(days=2), "前天")
-
-        m = re.fullmatch(r"(\d+)\s*天前", arg)
-        if m:
-            n = int(m.group(1))
-            day = today - timedelta(days=n)
-            return day_bounds(day, f"{day:%Y-%m-%d}")
-
-        m = re.fullmatch(r"(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", arg)
+        # 具体日期：2026年11月5日 / 2026-11-05 / 11月5日 / 11-05
+        m = re.search(
+            r"(\d{4})\s*[年./\-]\s*(\d{1,2})\s*[月./\-]\s*(\d{1,2})\s*[日号]?",
+            text,
+        )
         if m:
             try:
-                day = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                return from_day(
+                    datetime(int(m.group(1)), int(m.group(2)), int(m.group(3))),
+                    m.group(0),
+                )
             except ValueError:
-                return 0.0, now, "最新消息", True
-            return day_bounds(day, f"{day:%Y-%m-%d}")
-
-        m = re.fullmatch(r"(\d{1,2})[-/.](\d{1,2})", arg)
-        if m:
+                pass
+        for pattern in (r"(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]?",
+                        r"(?<![\d:])(\d{1,2})\s*[./\-]\s*(\d{1,2})(?![\d:])"):
+            m = re.search(pattern, text)
+            if not m:
+                continue
             try:
                 day = datetime(today.year, int(m.group(1)), int(m.group(2)))
             except ValueError:
-                return 0.0, now, "最新消息", True
+                continue
             if day > today:
                 day = day.replace(year=today.year - 1)
-            return day_bounds(day, f"{day:%Y-%m-%d}")
+            return from_day(day, m.group(0))
 
-        return 0.0, now, "最新消息", True
+        # 相对日
+        for words, back, label in (
+            (("大前天",), 3, "大前天"),
+            (("前天",), 2, "前天"),
+            (("昨天", "昨日", "昨儿"), 1, "昨天"),
+            (("今天", "今日", "本日", "今儿"), 0, "今天"),
+        ):
+            for word in words:
+                if word in text:
+                    rng, _matched = from_day(today - timedelta(days=back), word)
+                    start, stop, _lab, inc = rng
+                    return (start, stop, label, inc), word
+
+        m = re.search(r"(\d+)\s*天前", text)
+        if m:
+            return from_day(today - timedelta(days=int(m.group(1))), m.group(0))
+
+        # 最近 N 天
+        m = re.search(r"(?:最近|近|过去|这几天|最近\s*的?)\s*(\d+)\s*天", text)
+        if m:
+            days = max(1, int(m.group(1)))
+            return (now - days * 86400, now, f"最近 {days} 天", False), m.group(0)
+
+        # 本周 / 上周
+        if "上周" in text or "上星期" in text:
+            monday = today - timedelta(days=today.weekday() + 7)
+            return (
+                monday.timestamp(),
+                min((monday + timedelta(days=7)).timestamp(), now),
+                "上周",
+                False,
+            ), ("上周" if "上周" in text else "上星期")
+        for word in ("本周", "这周", "这个星期"):
+            if word in text:
+                monday = today - timedelta(days=today.weekday())
+                return (
+                    monday.timestamp(),
+                    min((monday + timedelta(days=7)).timestamp(), now),
+                    "本周",
+                    False,
+                ), word
+
+        return None, ""
 
     @staticmethod
-    def _looks_like_range(token: str) -> bool:
-        t = (token or "").strip()
-        if not t:
-            return False
-        if t in ("今天", "今日", "today", "昨天", "昨日", "yesterday", "前天"):
-            return True
-        return bool(
-            re.fullmatch(r"\d+\s*天前", t)
-            or re.fullmatch(r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}", t)
-            or re.fullmatch(r"\d{1,2}[-/.]\d{1,2}", t)
-        )
+    def _fold(text: str) -> str:
+        """繁转简 + 小写，让「极东」能匹配「極東」。"""
+        text = text or ""
+        if _zh_convert is None:
+            return text.lower()
+        try:
+            return _zh_convert(text, "zh-hans").lower()
+        except Exception:
+            return text.lower()
+
+    def _match_group(self, text: str) -> tuple[str | None, str]:
+        """按群号或群名片段匹配。返回 (群号, 命中的原文)。"""
+        text = text or ""
+        for gid in self.group_ids:
+            if gid in text:
+                return gid, gid
+        lowered = self._fold(text)
+        best_size, best_gid, best_hit = 0, None, ""
+        for gid, name in self.group_name_map.items():
+            if gid not in self.group_ids:
+                continue
+            bare = self._fold(name)
+            if bare and bare in lowered:
+                return gid, name
+            # 群名里任意 2~6 字的片段出现就算命中："考古" ⊂ "極東電子考古學結社"
+            for size in range(min(6, len(bare)), 1, -1):
+                hit = ""
+                for i in range(len(bare) - size + 1):
+                    piece = bare[i : i + size]
+                    if piece in lowered:
+                        hit = piece
+                        break
+                if hit:
+                    if size > best_size:
+                        best_size, best_gid, best_hit = size, gid, hit
+                    break
+        return (best_gid, best_hit) if best_gid else (None, "")
+
+    def _parse_range(self, arg: str) -> tuple[float, float, str, bool]:
+        """从一段文本里解析时间范围；解析不出就是「只看没看过的」。"""
+        rng, _matched = self._match_range(arg or "")
+        return rng if rng else (0.0, time.time(), "最新消息", True)
+
+    def _resolve_request(self, text: str):
+        """把一整句话解析成 (时间范围, 群号, 剩下的没认出来的碎片)。"""
+        rng, range_txt = self._match_range(text)
+        gid, group_txt = self._match_group(text)
+        rest = text or ""
+        for piece in (range_txt, group_txt):
+            if piece:
+                rest = rest.replace(piece, " ")
+        rest = self._clean_text(rest)
+        if gid and rest:
+            folded_name = self._fold(self.group_name_map.get(gid, ""))
+            rest = " ".join(
+                w
+                for w in rest.split()
+                if not (self._fold(w) and self._fold(w) in folded_name)
+            ).strip()
+        if rng is None:
+            rng = (0.0, time.time(), "最新消息", True)
+        return rng, gid, rest
+
+    async def _llm_parse_args(self, text: str) -> tuple[str, str] | None:
+        """规则没认出来的碎片，交给模型翻译成 {date, group}。"""
+        provider = self._get_provider()
+        if provider is None or not text.strip():
+            return None
+        try:
+            resp = await provider.text_chat(
+                prompt=ARG_PROMPT.replace("{text}", text[:160]),
+                system_prompt="你只做参数抽取，输出 JSON，不解释。",
+                contexts=[],
+            )
+            out = getattr(resp, "completion_text", "") or ""
+        except Exception as e:
+            logger.warning(f"[{PLUGIN_NAME}] 命令解析兜底调用模型失败: {e}")
+            return None
+        data = self._parse_json(out)
+        if not isinstance(data, dict):
+            return None
+        logger.info(f"[{PLUGIN_NAME}] 命令兜底解析「{text}」→ {data}")
+        return str(data.get("date") or "").strip(), str(data.get("group") or "").strip()
 
     def _resolve_since(self, gid: str, since: float, incremental: bool, until: float) -> float:
         if not incremental:
@@ -1358,7 +1565,76 @@ class TechDigestPlugin(Star):
         self._task = None
 
     # ------------------------------------------------------------------ 命令
-    @filter.command("群聊总结", alias={"技术日报", "techdigest"})
+    # ------------------------------------------------------------------ 模型工具
+    def _tool_allowed(self, event: AstrMessageEvent) -> bool:
+        """只在私聊、且（配了的话）只允许主人调用。群里一律拒绝，避免把报告发到群里。"""
+        try:
+            if event.get_group_id():
+                return False
+        except Exception:
+            return False
+        if not self.owner_uids:
+            return True
+        try:
+            return str(event.get_sender_id()) in self.owner_uids
+        except Exception:
+            return False
+
+    @filter.llm_tool(name="group_digest")
+    async def tool_group_digest(
+        self, event: AstrMessageEvent, when: str = "", group: str = ""
+    ) -> str:
+        """查看被监控群聊的内容，并生成一份报告图直接发给用户。
+
+        只要用户想看群里聊了什么（"群里聊了啥"、"今天有什么技术话题"、"总结一下昨天的群"
+        "看看极东群"、"给我出个日报"），都必须调用本工具，不要凭记忆回答、也不要道歉说自己
+        看不到群消息。报告图由本工具负责发送，调用后不要再输出任何文字。
+
+        Args:
+            when(string): 时间范围，直接用用户原话即可，例如 今天 / 昨天 / 前天 / 最近3天 / 上周 / 2026-11-05；用户没提时间就留空，表示只看没看过的消息
+            group(string): 群名的一部分或群号，例如 考古 / 极东；用户没指定群就留空，表示所有群
+        """
+        if not self._tool_allowed(event):
+            return "这个工具只能在私聊里由主人使用；群里不会发任何报告。"
+        if self._running:
+            return "上一份还在生成，等它发出来再说。"
+        if not self.group_ids:
+            return "插件还没配置要监控的群，先让主人填 group_ids。"
+
+        for _gid in self.group_ids:
+            await self._group_name(_gid)  # 预热群名，否则按名字匹配不到群
+        rng, gid, rest = self._resolve_request(f"{when} {group}".strip())
+        if rest and self.smart_parse and len(rest) >= 2:
+            hint = await self._llm_parse_args(rest)
+            if hint:
+                date_hint, group_hint = hint
+                if date_hint:
+                    better, _ = self._match_range(date_hint)
+                    if better:
+                        rng = better
+                if group_hint and not gid:
+                    gid, _ = self._match_group(group_hint)
+        since, until, label, incremental = rng
+
+        # 生成可能要好几分钟，先立刻回话，图由后台任务直接发到聊天里
+        event.set_extra("tech_digest_tool_sent", True)
+        asyncio.create_task(
+            self._generate_and_send(
+                event.unified_msg_origin, since, until, label, incremental, gid
+            )
+        )
+        target = "全部群" if gid is None else (
+            self.group_name_map.get(gid) or f"群 {gid}"
+        )
+        logger.info(
+            f"[{PLUGIN_NAME}] 工具调用：范围={label} 群={target} 原始「{when} {group}」"
+        )
+        return (
+            f"已在后台开始生成（范围：{label}，目标：{target}），"
+            "报告图会直接发到聊天里。不要再用文字复述或总结，保持沉默即可。"
+        )
+
+    @filter.command("群聊总结", alias={"技术日报"})
     async def cmd_digest(self, event: AstrMessageEvent):
         """生成技术情报日报（成功时不发任何提示，只发那张图）。
 
@@ -1372,35 +1648,43 @@ class TechDigestPlugin(Star):
         /群聊总结 状态        配置与本地库情况
         """
         arg = re.sub(
-            r"^\s*/?\s*(?:群聊总结|技术日报|techdigest)\s*",
+            r"^\s*/?\s*(?:群聊总结|技术日报)\s*",
             "",
             event.message_str or "",
             flags=re.IGNORECASE,
         ).strip()
 
-        tokens = [t for t in re.split(r"\s+", arg) if t]
+        for gid in self.group_ids:
+            await self._group_name(gid)  # 先把群名填进缓存，下面才能按群名匹配
 
-        if tokens and tokens[0] in ("状态", "配置", "status"):
+        norm = self._clean_text(arg)
+
+        if norm in ("状态", "配置", "情况", "设置", "详情"):
             yield event.plain_result("\n".join(await self._status_lines()))
             return
-        if tokens and tokens[0] in ("重发", "最新一份", "上一份", "last"):
+        if norm in ("重发", "再发", "上一份", "最新一份", "最后一份", "刚才那份"):
             latest = self._latest_report()
             if latest is None:
                 yield event.plain_result("还没有生成过日报。")
                 return
-            stamp = datetime.fromtimestamp(latest.stat().st_mtime).strftime("%m-%d %H:%M")
             yield event.image_result(str(latest))
-            yield event.plain_result(f"最近一份：{stamp} 生成（{latest.name}）")
             return
 
-        for gid in self.group_ids:
-            await self._group_name(gid)  # 先把群名填进缓存，下面才能按群名过滤
-        only_gid, range_tokens = self._split_group_filter(tokens)
-        range_arg = next(
-            (t for t in range_tokens if self._looks_like_range(t)),
-            "",
-        )
-        since, until, label, incremental = self._parse_range(range_arg)
+        rng, only_gid, rest = self._resolve_request(arg)
+        # 规则没吃掉的碎片，问一次模型（可在配置里关掉）
+        if rest and self.smart_parse and len(rest) >= 2:
+            hint = await self._llm_parse_args(rest)
+            if hint:
+                date_hint, group_hint = hint
+                if date_hint:
+                    better, _ = self._match_range(date_hint)
+                    if better:
+                        rng = better
+                if group_hint and not only_gid:
+                    better_gid, _ = self._match_group(group_hint)
+                    if better_gid:
+                        only_gid = better_gid
+        since, until, label, incremental = rng
 
         if self._running:
             yield event.plain_result("上一份还在生成，跑完会直接把图发给你。")
@@ -1408,30 +1692,16 @@ class TechDigestPlugin(Star):
         if not self.group_ids:
             yield event.plain_result("还没配置要监控的群（group_ids）。")
             return
+        logger.info(
+            f"[{PLUGIN_NAME}] 命令解析：范围={label} 增量={incremental} "
+            f"群={only_gid or '全部'} 原始「{arg}」"
+        )
         # 成功路径全程不吭声，只发图；失败才回文字
         asyncio.create_task(
             self._generate_and_send(
                 event.unified_msg_origin, since, until, label, incremental, only_gid
             )
         )
-
-    def _split_group_filter(self, tokens: list[str]) -> tuple[str | None, list[str]]:
-        if not tokens:
-            return None, tokens
-        for i, token in enumerate(tokens):
-            lowered = token.lower()
-            for gid, name in self.group_name_map.items():
-                if gid not in self.group_ids:
-                    continue
-                bare = name.lower()
-                if gid == token or (bare and (bare in lowered or lowered in bare)):
-                    rest = tokens[:i] + tokens[i + 1 :]
-                    return gid, rest
-            for gid in self.group_ids:
-                if gid == token:
-                    rest = tokens[:i] + tokens[i + 1 :]
-                    return gid, rest
-        return None, tokens
 
     async def _status_lines(self) -> list[str]:
         lines: list[str] = []

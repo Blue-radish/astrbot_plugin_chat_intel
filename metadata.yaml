@@ -5,6 +5,6 @@ desc: >-
   多群技术情报日报：从多个群里拉消息并实时留存图片，只抽取技术话题、工具与资源链接、
   就业与工作动态、AI 动向，外加一行极简统计和今日圣经金句；其余闲聊、灌水、表情一律不进报告。
   用本地 Typst 排版成一张长图，落盘到插件数据目录，永不发回群里；到点私聊推给你，也可用命令按日期生成。
-version: 1.2.1
+version: 1.2.2
 author: Ray
 repo: https://github.com/Blue-radish/astrbot_plugin_tech_digest
