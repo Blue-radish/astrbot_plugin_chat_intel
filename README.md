@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="docs/logo.png" width="132" alt="技术情报日报">
+  <img src="docs/logo.png" width="132" alt="群聊情报">
 </p>
 
-<h1 align="center">技术情报日报（astrbot_plugin_tech_digest）</h1>
+<h1 align="center">群聊情报（astrbot_plugin_chat_intel）</h1>
 
 <p align="center">把群聊压成一份<strong>只留技术向内容</strong>的情报简报，本地排版成一张长图，私聊发给你。</p>
 
@@ -41,7 +41,7 @@
 
 ```bash
 cd <AstrBot>/data/plugins
-git clone https://github.com/Blue-radish/astrbot_plugin_tech_digest
+git clone https://github.com/Blue-radish/astrbot_plugin_chat_intel
 ```
 
 然后在 WebUI 的「插件管理」里重载，或在配置里启用。
@@ -59,7 +59,7 @@ Typst 是本地排版引擎，`pip install` 即可，无需额外运行时（不
 报告模板优先使用 **Noto Sans SC**。把字体文件放进：
 
 ```
-<AstrBot>/data/plugin_data/astrbot_plugin_tech_digest/fonts/
+<AstrBot>/data/plugin_data/astrbot_plugin_chat_intel/fonts/
 ```
 
 至少放一个中文字体（`NotoSansSC.ttf` 或任何 `Source Han Sans` / `Microsoft YaHei` 均可），
@@ -69,7 +69,7 @@ Typst 是本地排版引擎，`pip install` 即可，无需额外运行时（不
 
 ## 配置
 
-在 WebUI 的插件配置页填写（也可以直接改 `data/config/astrbot_plugin_tech_digest_config.json`）：
+在 WebUI 的插件配置页填写（也可以直接改 `data/config/astrbot_plugin_chat_intel_config.json`）：
 
 | 配置项 | 说明 | 默认 |
 |---|---|---|
@@ -157,7 +157,7 @@ Typst 是本地排版引擎，`pip install` 即可，无需额外运行时（不
 本地只留最近 `keep_days` 天（默认 7）：
 
 ```
-data/plugin_data/astrbot_plugin_tech_digest/
+data/plugin_data/astrbot_plugin_chat_intel/
 ├── messages/2026-11-07.jsonl   # 按天的原始消息（含图片相对路径）
 ├── images/2026-11-07/xxxx.jpg  # 图片本体，按天分目录
 ├── reports/tech_digest_*.png   # 生成的报告
@@ -176,7 +176,7 @@ data/plugin_data/astrbot_plugin_tech_digest/
 想覆盖一整天，靠历史接口是不够的。
 
 所以本插件在静默通道里顺手把目标群的每条消息写到
-`data/plugin_data/astrbot_plugin_tech_digest/messages/YYYY-MM-DD.jsonl`，
+`data/plugin_data/astrbot_plugin_chat_intel/messages/YYYY-MM-DD.jsonl`，
 生成时把「本地库 + 历史接口兜底」合并去重。机器人 24 小时在线，就能拿到完整一天的聊天。
 
 代价是：**首次安装的当天只能覆盖最近 200 条**，第二天起才是完整一天。

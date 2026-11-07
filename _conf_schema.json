@@ -1,4 +1,4 @@
-{
+﻿{
   "group_ids": {
     "type": "string",
     "description": "要监控的群号，多个用逗号分隔（必填）",
@@ -100,7 +100,7 @@
   "report_title": {
     "type": "string",
     "description": "报告标题",
-    "default": "技术情报日报"
+    "default": "群聊情报"
   },
   "render_ppi": {
     "type": "int",

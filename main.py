@@ -28,7 +28,7 @@ from astrbot.api.message_components import Image as AstrImage
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools, register
 
-PLUGIN_NAME = "astrbot_plugin_tech_digest"
+PLUGIN_NAME = "astrbot_plugin_chat_intel"
 
 
 try:  # 简繁归一化：群名可能是繁体，用户打的是简体
@@ -154,7 +154,7 @@ USER_PROMPT_TEMPLATE = """下面是群「{group}」在 {window} 的聊天记录�
 {transcript}"""
 
 
-@register(PLUGIN_NAME, "Ray", "多群技术情报日报：只留技术向内容，视觉模型筛图，本地排版成图，静默私聊投递", "1.2.2")
+@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份兴趣，按兴趣总结群聊，视觉模型筛图，本地排版成图，静默私聊投递", "1.2.2")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
