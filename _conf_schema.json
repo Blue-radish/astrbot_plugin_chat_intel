@@ -1,0 +1,86 @@
+{
+  "group_id": {
+    "type": "string",
+    "description": "要总结的群号（必填）",
+    "default": "",
+    "hint": "例如 123456789；生成前必须填好"
+  },
+  "group_name": {
+    "type": "string",
+    "description": "群名（留空自动获取）",
+    "default": ""
+  },
+  "use_local_store": {
+    "type": "bool",
+    "description": "本地累积群消息（推荐开）",
+    "default": true,
+    "hint": "OneBot 历史接口通常只给最近约 200 条；开着才能在机器人常驻时覆盖一整天"
+  },
+  "platform_id": {
+    "type": "string",
+    "description": "用哪个 AstrBot 平台实例去拉消息（该账号必须在群里）",
+    "default": "",
+    "hint": "填 aiocqhttp / napcat 实例的 id，例如 bot_b"
+  },
+  "days": {
+    "type": "float",
+    "description": "回溯多少天",
+    "default": 1.0
+  },
+  "max_messages": {
+    "type": "int",
+    "description": "单次最多拉多少条消息",
+    "default": 1500
+  },
+  "daily_time": {
+    "type": "string",
+    "description": "每天自动生成的时间（HH:MM），留空则不定时",
+    "default": "23:00"
+  },
+  "push_enabled": {
+    "type": "bool",
+    "description": "生成后自动私聊推送",
+    "default": false
+  },
+  "push_umo": {
+    "type": "string",
+    "description": "推送目标会话 unified_msg_origin",
+    "default": "",
+    "hint": "格式 <平台id>:FriendMessage:<QQ号>，例如 mybot:FriendMessage:10001"
+  },
+  "provider_id": {
+    "type": "string",
+    "description": "指定模型供应商 id，留空用 AstrBot 默认",
+    "default": ""
+  },
+  "keep_quotes": {
+    "type": "bool",
+    "description": "是否保留「今日圣经」金句板块",
+    "default": true
+  },
+  "report_title": {
+    "type": "string",
+    "description": "报告标题",
+    "default": "技术情报日报"
+  },
+  "render_ppi": {
+    "type": "int",
+    "description": "出图清晰度（ppi，越大越清晰也越大）",
+    "default": 180
+  },
+  "ignore_uids": {
+    "type": "string",
+    "description": "不统计的 QQ 号，逗号分隔（一般填机器人自己）",
+    "default": ""
+  },
+  "silence_platforms": {
+    "type": "string",
+    "description": "静默平台：这些平台实例永不回复任何消息，逗号分隔；留空则静默 platform_id",
+    "default": ""
+  },
+  "font_dir": {
+    "type": "string",
+    "description": "字体目录，留空用插件数据目录下的 fonts/",
+    "default": ""
+  }
+}
