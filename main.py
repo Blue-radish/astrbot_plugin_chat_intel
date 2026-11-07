@@ -32,9 +32,9 @@ PLUGIN_NAME = "astrbot_plugin_chat_intel"
 
 
 try:  # 插件以包形式被 AstrBot 加载时走相对导入
-    from .interest import ChatInterest, parse_chats
+    from .interest import ChatInterest, build_digest_prompt, group_sections, parse_chats
 except ImportError:  # pragma: no cover - 单测按文件路径加载模块
-    from interest import ChatInterest, parse_chats
+    from interest import ChatInterest, build_digest_prompt, group_sections, parse_chats
 
 try:  # 简繁归一化：群名可能是繁体，用户打的是简体
     from zhconv import convert as _zh_convert
@@ -116,48 +116,7 @@ TECH_HINTS = (
     "offer", "jd", "recruit",
 )
 
-SYSTEM_PROMPT = """你是一名给计算机专业读者写情报简报的编辑。
-你只关心这些方向：计算机与编程、AI、软件与工具、有意思的网站与资源、工作与就业。
-读者的时间很贵，任何与技术无关的内容都不许出现在简报里。
-你的文字要克制、具体、可执行：写清楚谁遇到了什么、涉及哪个库/版本/报错/命令，结论是什么。"""
-
-USER_PROMPT_TEMPLATE = """下面是群「{group}」在 {window} 的聊天记录，格式为 `[HH:MM] 昵称: 内容`（`[图]` 表示这条带了图片）。
-
-请只抽取与「计算机/编程、AI、软件与工具、有意思的网站与资源、工作与就业」相关的内容，输出严格 JSON：
-
-{{
-  "headline": "一句话概括这段时间群里技术侧在聊什么（不超过 40 字；没有就填空字符串）",
-  "topics": [
-    {{"title": "不超过 12 字", "detail": "2-4 句话：谁遇到了什么、涉及的具体技术细节（库名/版本/报错原文/命令/方案）、最后结论", "people": ["昵称1", "昵称2"]}}
-  ],
-  "tools": [
-    {{"name": "工具/网站/仓库/论文名", "url": "记录里出现过的原始链接，没有就空字符串", "note": "一句话说明它有什么用"}}
-  ],
-  "jobs": [
-    {{"text": "岗位、校招、社招、面试、简历、薪资、行业动向等信息，一句话", "who": "相关人的昵称，可空"}}
-  ],
-  "ai_news": [
-    {{"text": "模型或 AI 工具的发布、评测、公司动态，一句话"}}
-  ],
-  "quotes": [
-    {{"content": "原文，可截取，不超过 80 字", "sender": "昵称", "reason": "一句话冷静点评，说明它为什么值得留"}}
-  ]
-}}
-
-硬性规则：
-1. 与技术无关的一律不要：吃饭、游戏内容、情感恋爱、追星、地域或时政争吵、纯玩梗复读。
-2. 数量上限：topics 5 条、tools 8 条、jobs 5 条、ai_news 5 条、quotes 4 条。宁少勿凑，没有就返回空数组。
-3. 记录里没有的东西绝对不要编造；url 只能照抄记录中出现过的链接。
-4. tools 只在「记录里出现链接、仓库/项目名并说明了用途，或有人真的在用它」时收录；
-   只是顺口提一句产品名（例如"我现在都不用 GitHub 了"）不要收录。
-5. 纯情绪、纯吐槽、没有信息量的话题（"这个好难啊""怎么办"）不要单独成条，除非里面有具体报错、版本、命令或方案。
-6. 如果记录里出现 `[图]` 且上下文在讲技术（报错截图、代码截图、架构图、数据图表），
-   在对应 topic 的 detail 里点一句「（有配图）」，方便读者找到原图。
-7. 只输出 JSON 本体，不要 markdown 代码块，不要任何解释文字。
-
-聊天记录：
-{transcript}"""
-
+SYSTEM_PROMPT = """你在给群友写一份私人情报简报。文字克制、具体、可执行。"""
 
 @register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份兴趣，按兴趣总结群聊，视觉模型筛图，本地排版成图，静默私聊投递", "1.2.2")
 class TechDigestPlugin(Star):
@@ -1024,7 +983,7 @@ class TechDigestPlugin(Star):
     def _build_transcript(self, records: list[dict]) -> tuple[str, int, int]:
         lines: list[str] = []
         senders: set[str] = set()
-        for rec in records:
+        for idx, rec in enumerate(records):
             uid = str(rec.get("uid") or "")
             if uid in self.ignore_uids:
                 continue
@@ -1041,7 +1000,7 @@ class TechDigestPlugin(Star):
             if has_img and "[图]" not in body:
                 body += " [图]"
             senders.add(uid)
-            lines.append(f"[{stamp}] {name}: {body}")
+            lines.append(f"[{stamp}] #{idx} {name}: {body}")
         return "\n".join(lines), len(lines), len(senders)
 
     @staticmethod
@@ -1061,14 +1020,15 @@ class TechDigestPlugin(Star):
             chunks.append("\n".join(current))
         return chunks
 
-    async def _extract_chunk(self, group_name: str, window: str, transcript: str) -> dict | None:
+    async def _extract_chunk(
+        self, chat: ChatInterest, group_name: str, window: str, transcript: str
+    ) -> dict | None:
         provider = self._get_provider()
         if provider is None:
             logger.error(f"[{PLUGIN_NAME}] 没有可用的模型供应商")
             return None
-        prompt = USER_PROMPT_TEMPLATE.format(
-            group=group_name, window=window, transcript=transcript
-        )
+        # 指令必须写在 user 消息里，且放在转录之后（这个 provider 只认最后一条 user）
+        prompt = build_digest_prompt(chat, group_name, window, transcript)
         try:
             resp = await provider.text_chat(
                 prompt=prompt, system_prompt=SYSTEM_PROMPT, contexts=[]
@@ -1110,41 +1070,81 @@ class TechDigestPlugin(Star):
                 break
         return out
 
-    def _merge_parts(self, parts: list[dict]) -> dict:
-        merged = {
-            "headline": "",
-            "topics": [],
-            "tools": [],
-            "jobs": [],
-            "ai_news": [],
-            "quotes": [],
-        }
+    def _merge_parts(self, parts: list[dict], chat: ChatInterest) -> dict:
+        """合并各分片的条目，按该群的兴趣分节；跨块重复的条目只留一条。"""
+        headline = ""
+        items: list[dict] = []
+        quotes: list[dict] = []
+        seen_items: set[tuple] = set()
+        seen_quotes: set[str] = set()
+
         for part in parts:
-            if not merged["headline"]:
-                merged["headline"] = str(part.get("headline") or "").strip()
-            for key in ("topics", "tools", "jobs", "ai_news", "quotes"):
-                value = part.get(key)
-                if isinstance(value, list):
-                    merged[key].extend(value)
-        merged["topics"] = self._dedupe(
-            merged["topics"], lambda t: str(t.get("title") or "").strip()[:20], CAP_TOPICS
-        )
-        merged["tools"] = self._dedupe(
-            merged["tools"], lambda t: str(t.get("name") or "").strip().lower(), CAP_TOOLS
-        )
-        merged["jobs"] = self._dedupe(
-            merged["jobs"], lambda t: str(t.get("text") or "").strip()[:24], CAP_JOBS
-        )
-        merged["ai_news"] = self._dedupe(
-            merged["ai_news"], lambda t: str(t.get("text") or "").strip()[:24], CAP_AI_NEWS
-        )
-        merged["quotes"] = self._dedupe(
-            merged["quotes"], lambda t: str(t.get("content") or "").strip()[:24], CAP_QUOTES
-        )
-        return merged
+            if not isinstance(part, dict):
+                continue
+            if not headline:
+                headline = str(part.get("headline") or "").strip()
+            for item in part.get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                topic = str(item.get("topic") or "").strip()
+                if not topic:
+                    continue
+                detail = str(item.get("detail") or "").strip()
+                key = (topic[:20], detail[:20])
+                if key in seen_items:
+                    continue
+                seen_items.add(key)
+                items.append(
+                    {
+                        "msg_no": item.get("msg_no"),
+                        "want_item": str(item.get("want_item") or "").strip(),
+                        "topic": topic,
+                        "detail": detail,
+                        "kind": str(item.get("kind") or "").strip(),
+                    }
+                )
+            for quote in part.get("quotes") or []:
+                if not isinstance(quote, dict):
+                    continue
+                content = str(quote.get("content") or "").strip()
+                if not content or content[:24] in seen_quotes:
+                    continue
+                seen_quotes.add(content[:24])
+                quotes.append(
+                    {
+                        "content": content,
+                        "sender": str(quote.get("sender") or "").strip(),
+                        "reason": str(quote.get("reason") or "").strip(),
+                    }
+                )
+
+        sections, truncated = group_sections(chat, items)
+        return {
+            "headline": headline,
+            "sections": sections,
+            "items": items,
+            "quotes": quotes[:CAP_QUOTES],
+            "truncated": truncated,
+        }
 
     # ------------------------------------------------------------------ 图片挑选
     @staticmethod
+    async def _alert_missing_want(self, group_name: str, gid: str) -> None:
+        """某个群没配「想要的主题」时私聊提醒一次，不反复骚扰。"""
+        key = f"warned_want_{gid}"
+        if self.state.get(key):
+            return
+        self.state[key] = int(time.time())
+        self._save_state()
+        text = (
+            f"⚠ {group_name} 还没配置「想要的主题」，这次跳过了。\n"
+            f"在插件设置 → 要总结的群 → 这个群的「想要的主题」里加几行就行。"
+        )
+        try:
+            await self._push_text(text)
+        except Exception as e:
+            logger.warning(f"[{PLUGIN_NAME}] 告警发送失败: {e}")
+
     def _image_dims(path: Path) -> tuple[int, int]:
         """返回 (宽, 高)；读不出来给 (0, 0)。"""
         try:
@@ -1445,8 +1445,13 @@ class TechDigestPlugin(Star):
     async def generate_group(
         self, gid: str, since: float, until: float, label: str, incremental: bool
     ) -> tuple[Path | None, str]:
-        if gid not in self.group_ids:
-            return None, f"群 {gid} 不在监控列表里", True
+        chat = self._chat(gid)
+        if chat is None:
+            return None, f"群 {gid} 不在配置里", True
+        if not chat.want:
+            group_name = await self._group_name(gid)
+            await self._alert_missing_want(group_name, gid)
+            return None, f"{group_name}：这个群还没配置「想要的主题」，跳过", True
         real_since = self._resolve_since(gid, since, incremental, until)
         group_name = await self._group_name(gid)
 
@@ -1479,7 +1484,7 @@ class TechDigestPlugin(Star):
         parts: list[dict] = []
         for i, chunk in enumerate(chunks, 1):
             window = label if len(chunks) == 1 else f"{label}（第 {i}/{len(chunks)} 段）"
-            part = await self._extract_chunk(group_name, window, chunk)
+            part = await self._extract_chunk(chat, group_name, window, chunk)
             if part:
                 parts.append(part)
             if len(chunks) > 1:
@@ -1487,34 +1492,38 @@ class TechDigestPlugin(Star):
         if not parts:
             return None, f"{group_name}：模型没有给出可用的结构化结果", True
 
-        data = self._merge_parts(parts)
+        data = self._merge_parts(parts, chat)
         quotes = data.get("quotes") or []
         if not self.keep_quotes:
             quotes = []
 
-        topic_people: set[str] = set()
-        for topic in data.get("topics") or []:
-            value = topic.get("people")
-            if isinstance(value, list):
-                topic_people.update(str(v) for v in value)
-            elif value:
-                topic_people.add(str(value))
-        images = await self._select_images(records, topic_people)
+        sections = data.get("sections") or []
+        flat_items = [item for _title, bucket in sections for item in bucket]
+
+        images = await self._select_images(records, set())
 
         now = datetime.now()
         payload = {
-            "title": self.report_title,
+            "title": chat.title or self.report_title,
             "date": now.strftime("%Y-%m-%d"),
             "group": group_name,
             "stats": {
-                "line": f"{msg_count} 条消息 · {people} 人参与 · {label}",
+                "line": (
+                    f"{len(records)} 条消息 · 采纳 {len(flat_items)} 条 · "
+                    f"上限截断 {data.get('truncated') or 0} 条 · {label}"
+                ),
             },
             "headline": str(data.get("headline") or "").strip(),
-            "topics": self._norm_list(data.get("topics"), ("title", "detail", "people")),
-            "tools": self._norm_list(data.get("tools"), ("name", "url", "note")),
-            "jobs": self._norm_list(data.get("jobs"), ("text", "who")),
-            "ai_news": self._norm_list(data.get("ai_news"), ("text",)),
+            "sections": sections,
             "quotes": self._norm_list(quotes, ("content", "sender", "reason")),
+            # 兼容旧模板：Task 7 换成按 sections 渲染后这三行可以删掉
+            "topics": [
+                {"title": item["topic"], "detail": item.get("detail", ""), "people": ""}
+                for item in flat_items
+            ],
+            "tools": [],
+            "jobs": [],
+            "ai_news": [],
             "footer": f"生成于 {now:%Y-%m-%d %H:%M} · {PLUGIN_NAME} · 本报告不会发到群里",
         }
 
@@ -1527,10 +1536,10 @@ class TechDigestPlugin(Star):
         self._group_state(gid)["last_report"] = path.name
         self._save_state()
 
+        section_desc = "、".join(f"{title} {len(bucket)}" for title, bucket in sections) or "无"
         info = (
-            f"[{group_name}] {label}：{msg_count} 条 / {people} 人 · "
-            f"话题 {len(payload['topics'])} · 资源 {len(payload['tools'])} · "
-            f"就业 {len(payload['jobs'])} · AI {len(payload['ai_news'])} · "
+            f"[{group_name}] {label}：{len(records)} 条 / 采纳 {len(flat_items)} 条"
+            f"（{section_desc}）· 截断 {data.get('truncated') or 0} 条 · "
             f"金句 {len(payload['quotes'])} · 图 {len(payload['images'])}"
             + (f" · {len(chunks)} 段" if len(chunks) > 1 else "")
         )
