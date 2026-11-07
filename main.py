@@ -2561,6 +2561,10 @@ class TechDigestPlugin(Star):
         if filled:
             self._apply_chats(self.config.get("chats"))
         self.push_umo, self._push_cfg_error = self.build_push_target(self.config)
+        try:
+            self._save_state()
+        except Exception as e:
+            logger.warning(f"[{PLUGIN_NAME}] 迁移标记写入失败: {e}")
 
     def _save_config(self) -> bool:
         """把内存里的 config 落盘（AstrBot 的 AstrBotConfig 才有 save_config）。"""
