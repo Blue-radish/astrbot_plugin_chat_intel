@@ -6,6 +6,6 @@ desc: >-
   不要的标签）把记录切成一张张话题卡，写清时间、参与人和完整经过，配图跟着话题卡走；
   不符合标签的闲聊、灌水、表情一律不进报告。
   用本地 Typst 排版成一张长图，落盘到插件数据目录，永不发回群里；到点私聊推给你，或者在私聊里用大白话说一句「群聊情报今天群里聊了啥」。
-version: 2.2.2
+version: 2.2.3
 author: Ray
 repo: https://github.com/Blue-radish/astrbot_plugin_chat_intel

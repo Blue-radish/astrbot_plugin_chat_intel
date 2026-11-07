@@ -134,10 +134,13 @@
             inset: 4pt,
             stroke: 0.5pt + hair,
           )[
+            // 长图切段横排后本身是「宽」的：按宽度铺满，字号才够看；
+            // 其它图继续按高度约束，避免竖图把卡片拉成一屏
+            #let wide = p.at("wide", default: false)
             #image(
               p.at("path"),
               width: 100%,
-              height: if pics.len() == 1 { 200pt } else { 96pt },
+              height: if wide { auto } else if pics.len() == 1 { 200pt } else { 96pt },
               fit: "contain",
             )
             #v(2pt)

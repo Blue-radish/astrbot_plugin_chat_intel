@@ -34,6 +34,7 @@ PLUGIN_NAME = "astrbot_plugin_chat_intel"
 
 
 try:  # 插件以包形式被 AstrBot 加载时走相对导入
+    from . import imaging  # 长图切段横排（出图脚本共用同一实现）
     from .intent import detect_intent
     from .interest import (
         ChatInterest,
@@ -48,6 +49,7 @@ try:  # 插件以包形式被 AstrBot 加载时走相对导入
         topic_time_range,
     )
 except ImportError:  # pragma: no cover - 单测按文件路径加载模块
+    import imaging  # noqa: F401
     from intent import detect_intent
     from interest import (
         ChatInterest,
@@ -143,7 +145,9 @@ class TechDigestPlugin(Star):
         self.group_name_map: dict[str, str] = {}
         self.days = self._num_cfg("days", 1.0, lo=0.0, as_float=True)
         self.max_messages = self._num_cfg("max_messages", 10000, lo=50)
-        self.daily_time = str(self.config.get("daily_time") or "").strip()
+        self.daily_time, self._daily_cfg_error = self.normalize_daily_time(
+            self.config.get("daily_time")
+        )
         self.push_enabled = self._as_bool(self.config.get("push_enabled"), False)
         # 推送目标用「发信账号 + 收件人 QQ」两个框拼，旧配置里整串的 push_umo 继续认
         self.push_umo, self._push_cfg_error = self.build_push_target(self.config)
@@ -219,6 +223,8 @@ class TechDigestPlugin(Star):
             )
         if self._push_cfg_error:
             logger.error(f"[{PLUGIN_NAME}] 推送设置有问题：{self._push_cfg_error}")
+        if self._daily_cfg_error:
+            logger.error(f"[{PLUGIN_NAME}] {self._daily_cfg_error}")
         if not self.group_ids:
             logger.warning(
                 f"[{PLUGIN_NAME}] 还没配置要总结的群（chats），现在是待配置状态；"
@@ -256,6 +262,20 @@ class TechDigestPlugin(Star):
         return float(value) if as_float else int(value)
 
     @staticmethod
+    def normalize_daily_time(raw) -> tuple[str, str]:
+        """把「9:00」补成「09:00」；看不懂就返回 ("", 原因)，别让它静默永不触发。"""
+        text = str(raw or "").strip()
+        if not text:
+            return "", ""
+        matched = re.fullmatch(r"(\d{1,2})\s*[:：]\s*(\d{1,2})", text)
+        if not matched:
+            return "", f"定时时间「{text}」看不懂，请写成 HH:MM（比如 09:00），现在不定时生成"
+        hour, minute = int(matched.group(1)), int(matched.group(2))
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return "", f"定时时间「{text}」不是有效时刻，现在不定时生成"
+        return f"{hour:02d}:{minute:02d}", ""
+
+    @staticmethod
     def _parse_silence(config: dict) -> list[str]:
         """解析静默名单。静默与「读历史账号」互不联动，必须显式配置。"""
         config = config or {}
@@ -277,8 +297,11 @@ class TechDigestPlugin(Star):
         platform = str(config.get("push_platform") or "").strip()
         uid = str(config.get("push_uid") or "").strip()
         legacy = str(config.get("push_umo") or "").strip()
+        # 新字段「存在但为空」= 用户在界面上清空了，就是明确不要推送，
+        # 不能偷偷回落到那条已经隐藏的旧值；只有旧配置里压根没有新字段时才用旧串。
+        has_new_keys = "push_platform" in config or "push_uid" in config
         if not platform and not uid:
-            return legacy, ""
+            return ("" if has_new_keys else legacy), ""
         if not platform:
             return "", "填了收件人 QQ 号，但没填「用哪个机器人发」"
         if not uid:
@@ -529,8 +552,8 @@ class TechDigestPlugin(Star):
             else:
                 await self._send_text(umo, f"已经在跑一份、后面还排着 {QUEUE_MAX} 份了，等它们跑完再叫我。")
             return
-        await self._generate_and_send(
-            umo, since, until, label, incremental, gid, announce=True
+        await self._execute(
+            ("digest", umo, since, until, label, incremental, gid, True)
         )
 
     def _enqueue(self, request: tuple) -> bool:
@@ -540,18 +563,36 @@ class TechDigestPlugin(Star):
         self._queue.append(request)
         return True
 
+    async def _execute(self, request: tuple) -> None:
+        """唯一的生成执行入口：置忙 → 跑 → 清忙 → 接着吃队列里的下一份。
+
+        定时任务、自然语言入口、模型工具都走这里。以前三条路径各自置忙/排空，
+        结果「队列里的定时」跑的时候 `_running` 是 False（能并发），而且定时跑完
+        不再排空队列，后面排着的请求会一直躺着。
+        """
+        while True:
+            self._running = True
+            try:
+                if request and request[0] == "daily":
+                    await self._run_daily_once()
+                else:
+                    await self._generate_and_send(*request[1:])
+            except Exception as e:
+                logger.error(f"[{PLUGIN_NAME}] 生成任务失败: {e}", exc_info=True)
+            finally:
+                self._running = False
+            if not self._queue:
+                return
+            request = self._queue.popleft()
+            logger.info(
+                f"[{PLUGIN_NAME}] 接着跑排队的任务（队列还剩 {len(self._queue)} 份）"
+            )
+
     async def _drain_pending(self) -> None:
-        """把排队的请求接着跑掉（先进先出，一次一份）。"""
+        """把排队的第一份接着跑掉（跑完会继续吃后面的）。"""
         if not self._queue:
             return
-        request = self._queue.popleft()
-        try:
-            if request and request[0] == "daily":
-                await self._run_daily_once()
-            else:
-                await self._generate_and_send(*request[1:])
-        except Exception as e:
-            logger.error(f"[{PLUGIN_NAME}] 排队的那份生成失败: {e}", exc_info=True)
+        await self._execute(self._queue.popleft())
 
     async def _known_groups_text(self) -> str:
         """现在配了哪些群，用来在「找不到这个群」时回答用户。"""
@@ -587,14 +628,21 @@ class TechDigestPlugin(Star):
         await self._send_text(
             umo,
             "这个插件还没配置「谁可以拉报告」（owner_uids），现在谁私聊都不会生成。\n"
-            "去 WebUI → 插件管理 → 群聊情报 → 访问权限 → owner_uids 填上你自己的 QQ 号，保存后再叫我。",
+            "去 WebUI → 插件管理 → 群聊情报 → 设置 → 「谁可以要报告（owner_uids）」里填上你自己的 QQ 号，"
+            "保存后再叫我。",
         )
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=900)
     async def intercept_digest_intent(self, event: AstrMessageEvent):
         """私聊里用大白话要报告时直接出图，不赌模型会不会调工具。"""
         if not self._tool_allowed(event):
-            # 只对「在要报告」的人说清楚原因，别把闲聊也打断
+            # 群里一个字都不说（这是一条硬规矩：群内零动静）
+            try:
+                if event.get_group_id():
+                    return
+            except Exception:
+                return
+            # 私聊里只对「在要报告」的人说清楚原因，别把闲聊也打断
             text = (event.message_str or "").strip()
             if text and not text.startswith(("/", "／", "#")):
                 intent = detect_intent(text)
@@ -695,6 +743,7 @@ class TechDigestPlugin(Star):
                 return
             record = {
                 "t": self._event_time(event),
+                "mid": str(getattr(getattr(event, "message_obj", None), "message_id", "") or ""),
                 "gid": gid,
                 "uid": uid,
                 "name": str(event.get_sender_name() or "")[:16],
@@ -822,18 +871,24 @@ class TechDigestPlugin(Star):
 
     @staticmethod
     def _dedupe_records(records: list[dict]) -> list[dict]:
-        """同一条消息被两个 bot 各收一次时只留一条（与平台无关）。
+        """同一条消息被两个 bot / 本地与历史各收一次时只留一条（与平台无关）。
 
-        同一人同一秒发了文字相同的两条不同图片时也会撞键，所以遇到重复要把图片并起来，
-        不能整条丢掉。
+        有消息 id 就用 id（最准）；老记录没有 id 才回落到「发送者 + 时间 + 文本」指纹。
+        撞键时要把图片并起来，不能整条丢掉——两个 bot 收到的图片链接常常不一样。
         """
         index: dict[tuple, dict] = {}
         out: list[dict] = []
         for rec in records:
+            mid = str(rec.get("mid") or "")
             key = (
-                str(rec.get("uid") or ""),
-                int(rec.get("t") or 0),
-                str(rec.get("text") or "")[:40],
+                ("mid", mid)
+                if mid
+                else (
+                    "fp",
+                    str(rec.get("uid") or ""),
+                    int(rec.get("t") or 0),
+                    str(rec.get("text") or "")[:40],
+                )
             )
             kept = index.get(key)
             if kept is None:
@@ -946,6 +1001,7 @@ class TechDigestPlugin(Star):
             "uid": str(msg.get("user_id") or ""),
             "name": str(sender.get("card") or sender.get("nickname") or "")[:16],
             "text": self._msg_text(msg)[:280],
+            "mid": str(msg.get("message_id") or msg.get("real_id") or ""),
         }
         return record
 
@@ -1274,14 +1330,31 @@ class TechDigestPlugin(Star):
                     await asyncio.sleep(2)
                 continue
             data = self._parse_json(text)
-            if data:
+            ok, why = self._chunk_ok(data)
+            if ok:
                 return data
             logger.warning(
-                f"[{PLUGIN_NAME}] 这一段没拿到可用 JSON（第 {attempt}/{CHUNK_RETRY} 次）"
+                f"[{PLUGIN_NAME}] 这一段结果不可用（第 {attempt}/{CHUNK_RETRY} 次）：{why}；"
+                f"原文前 120 字：{text[:120]}"
             )
             if attempt < CHUNK_RETRY:
                 await asyncio.sleep(2)
         return None
+
+    @staticmethod
+    def _chunk_ok(data) -> tuple[bool, str]:
+        """这一段的结果能不能用：顶层是对象、topics 是列表（空列表表示没有命中话题，算成功）。
+
+        不能用「非空字典」当成功——模型偶尔会回 {"error": ...} 之类的对象，
+        那样这一段的内容会静默消失，游标却照常前进。
+        """
+        if not isinstance(data, dict):
+            return False, f"顶层不是 JSON 对象（{type(data).__name__}）"
+        if "topics" not in data:
+            return False, "缺少 topics 字段"
+        if not isinstance(data.get("topics"), list):
+            return False, f"topics 不是列表（{type(data.get('topics')).__name__}）"
+        return True, ""
 
     @staticmethod
     def _parse_json(text: str) -> dict | None:
@@ -1757,6 +1830,19 @@ class TechDigestPlugin(Star):
         return [i for _score, i in scored]
 
     # ------------------------------------------------------------------ 渲染
+    # 长图（超长竖图）处理：实现在 imaging.py，出图脚本也复用同一套
+    TALL_RATIO = imaging.TALL_RATIO
+    TALL_MAX_SLICES = imaging.TALL_MAX_SLICES
+    TARGET_ASPECT = imaging.TARGET_ASPECT
+
+    @staticmethod
+    def compose_tall_image(src: Path, dst: Path) -> Path:
+        """超长竖图切段横排；不需要切或失败都原样返回 src。"""
+        out = imaging.compose_tall_image(src, dst)
+        if out == dst:
+            logger.info(f"[{PLUGIN_NAME}] 长图切段横排：{src.name} → {dst.name}")
+        return out
+
     def _render(self, payload: dict, gid: str, label: str) -> Path | None:
         try:
             import typst
@@ -1780,16 +1866,24 @@ class TechDigestPlugin(Star):
                     src = Path(img.get("path") or "")
                     if not src.is_file():
                         continue
-                    ext = src.suffix.lower() or ".jpg"
-                    dst = img_dir / f"{seq}{ext}"
-                    try:
-                        shutil.copyfile(src, dst)
-                    except Exception:
-                        continue
+                    # 超长竖图先切段横排，否则缩到 200pt 高就只剩一条看不清
                     seq += 1
-                    copies.append(
-                        {"path": f"img/{dst.name}", "caption": img.get("caption") or ""}
-                    )
+                    composed = img_dir / f"{seq}.png"
+                    sliced = self.compose_tall_image(src, composed) == composed
+                    if sliced:
+                        dst = composed
+                    else:
+                        ext = src.suffix.lower() or ".jpg"
+                        dst = img_dir / f"{seq}{ext}"
+                        try:
+                            shutil.copyfile(src, dst)
+                        except Exception:
+                            continue
+                    entry = {"path": f"img/{dst.name}", "caption": img.get("caption") or ""}
+                    if sliced:
+                        # 切段横排过的长图本身就是「宽」的，铺满版心比卡高度看得更清
+                        entry["wide"] = True
+                    copies.append(entry)
                 topic["images"] = copies
             (job / "data.json").write_text(
                 json.dumps(payload, ensure_ascii=False), encoding="utf-8"
@@ -1836,19 +1930,8 @@ class TechDigestPlugin(Star):
         if len(records) < 20:
             history = await self._fetch_history(gid, real_since, until)
             if history:
-                seen: set[tuple] = set()
-                merged: list[dict] = []
-                for rec in sorted(records + history, key=lambda r: int(r.get("t") or 0)):
-                    key = (
-                        str(rec.get("uid") or ""),
-                        int(rec.get("t") or 0) // 60,
-                        str(rec.get("text") or "")[:40],
-                    )
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    merged.append(rec)
-                records = merged[-self.max_messages :]
+                # 走同一套去重（按消息 id，撞键合并图片），不再另搞一套分钟级指纹
+                records = self._dedupe_records(records + history)[-self.max_messages :]
 
         if not records:
             return None, f"{group_name}：{label}没有消息", False
@@ -1863,10 +1946,15 @@ class TechDigestPlugin(Star):
         for i, chunk in enumerate(chunks, 1):
             window = label if len(chunks) == 1 else f"{label}（第 {i}/{len(chunks)} 段）"
             part = await self._extract_chunk(chat, group_name, window, chunk)
-            if part:
+            ok, why = self._chunk_ok(part)
+            if ok:
                 parts.append(part)
             else:
                 failed.append(i)
+                if part is not None:
+                    logger.warning(
+                        f"[{PLUGIN_NAME}] {group_name} 第 {i} 段结果结构不对：{why}"
+                    )
             if len(chunks) > 1:
                 await asyncio.sleep(0.5)
         if not parts:
@@ -1926,8 +2014,9 @@ class TechDigestPlugin(Star):
             f"[{group_name}] {label}：{len(records)} 条 / {len(topics)} 个话题"
             f"（标签 {tag_desc}）· 图 {image_count}"
             + (f" · {len(chunks)} 段" if len(chunks) > 1 else "")
-            + f" · ⚠ 缺 {len(failed)} 段（不完整）" if incomplete else ""
         )
+        if incomplete:
+            info += f" · ⚠ 缺 {len(failed)} 段（不完整）"
         logger.info(f"[{PLUGIN_NAME}] {info} -> {path.name}")
         self._prune_old_files()
         return path, info, False
@@ -2063,11 +2152,7 @@ class TechDigestPlugin(Star):
                                 )
                         else:
                             self._last_run_date = today
-                            self._running = True
-                            try:
-                                await self._run_daily_once()
-                            finally:
-                                self._running = False
+                            await self._execute(("daily",))
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -2100,8 +2185,8 @@ class TechDigestPlugin(Star):
         self._prune_old_files()
         if not self.owner_uids:
             logger.warning(
-                f"[{PLUGIN_NAME}] 没有配置 owner_uids：任何私聊都能让它生成报告，"
-                "建议填上自己的 QQ 号"
+                f"[{PLUGIN_NAME}] 没有配置 owner_uids：现在任何私聊都不会生成报告"
+                "（只会收到一条配置提示）。要用人，就在设置里填上自己的 QQ 号"
             )
         missing_key = [
             str(row.get("gid") or "?")
@@ -2191,16 +2276,6 @@ class TechDigestPlugin(Star):
             return "这个工具只能在私聊里由主人使用；群里不会发任何报告。"
         if not self._tool_cue(event):
             return "用户这句话不是在要群聊总结，不要调用本工具，正常回答即可。"
-        if self._running:
-            for _gid in self.group_ids:
-                await self._group_name(_gid)
-            rng, gid, _rest = self._resolve_request(f"{when} {group}".strip())
-            since, until, label, incremental = rng
-            if self._enqueue(
-                ("digest", event.unified_msg_origin, since, until, label, incremental, gid, True)
-            ):
-                return "上一份还在生成，这份已经排队，跑完接着发。"
-            return "已经在跑一份、后面还排着队了，等它们跑完再叫我。"
         if not self.group_ids:
             return "插件还没配置要监控的群，先让主人在「要总结的群」里加一行。"
 
@@ -2227,13 +2302,25 @@ class TechDigestPlugin(Star):
                 f"现在配好的群：{await self._known_groups_text()}"
             )
 
+        # 解析和拒绝都做完，才决定「立刻跑」还是「排队」——两种状态参数完全一样
+        request = (
+            "digest",
+            event.unified_msg_origin,
+            since,
+            until,
+            label,
+            incremental,
+            gid,
+            True,
+        )
+        if self._running:
+            if self._enqueue(request):
+                return "上一份还在生成，这份已经排队，跑完接着发。"
+            return "已经在跑一份、后面还排着队了，等它们跑完再叫我。"
+
         # 生成可能要好几分钟，先立刻回话，图由后台任务直接发到聊天里
         event.set_extra("chat_intel_tool_sent", True)
-        asyncio.create_task(
-            self._generate_and_send(
-                event.unified_msg_origin, since, until, label, incremental, gid
-            )
-        )
+        asyncio.create_task(self._execute(request))
         target = "全部群" if gid is None else (
             self.group_name_map.get(gid) or f"群 {gid}"
         )
@@ -2288,8 +2375,11 @@ class TechDigestPlugin(Star):
         if self.push_enabled and not self._push_target_ok():
             reason = self._push_cfg_error or f"{self.push_umo or '目标为空'} 不是合法的私聊会话"
             push_state = f"⚠ 配置有问题（{reason}），不会发送"
+        daily_desc = self.daily_time or "关闭"
+        if self._daily_cfg_error:
+            daily_desc = f"⚠ {self._daily_cfg_error}"
         lines.append(
-            f"定时生成 {self.daily_time or '关闭'} · 自动推送 {push_state} · "
+            f"定时生成 {daily_desc} · 自动推送 {push_state} · "
             f"上限 {self.max_messages} 条 · 每个话题最多 {self.max_images} 张图 · "
             f"数据保留 {self.keep_days} 天"
         )
@@ -2305,7 +2395,6 @@ class TechDigestPlugin(Star):
         only_gid: str | None,
         announce: bool = False,
     ) -> None:
-        self._running = True
         try:
             results = await self.generate_all(since, until, label, incremental, only_gid)
             for _gid, path, info, is_error in results:
@@ -2329,9 +2418,6 @@ class TechDigestPlugin(Star):
                 await self.context.send_message(umo, MessageChain().message(f"生成失败：{e}"))
             except Exception:
                 pass
-        finally:
-            self._running = False
-            await self._drain_pending()
 
     # ------------------------------------------------------------------ 过期清理
     def _prune_old_files(self) -> None:

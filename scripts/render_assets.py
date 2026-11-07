@@ -19,6 +19,7 @@ ROOT = HERE.parent
 
 sys.path.insert(0, str(ROOT))
 from interest import split_names  # noqa: E402  与插件用同一套「群友 ID」切分
+from imaging import compose_tall_image  # noqa: E402  与插件共用同一套长图切段
 TEMPLATE = ROOT / "templates" / "report.typ"
 LOGO = ROOT / "assets" / "logo.typ"
 
@@ -41,6 +42,37 @@ SHOT_TERMINAL = """
   #linebreak()
   #v(8pt)
   #text(fill: rgb("#94a3b8"), "webpack 5.91.0 compiled with 1 error in 3142 ms")
+]
+"""
+
+# 群里常见「一张截屏聊到底」的长图：样张里也要有，才能看出它是被切段横排的
+SHOT_LONG = """
+#set page(width: 420pt, height: auto, margin: 0pt, fill: rgb("#f7f8fa"))
+#set text(font: ("Inter", "Noto Sans SC"), size: 11pt, fill: rgb("#334155"))
+#let bubbles = (
+  ("阿越", lorem(28)),
+  ("摩斯卡", lorem(34)),
+  ("阿越", lorem(22)),
+  ("蛋蛋", lorem(40)),
+  ("摩斯卡", lorem(30)),
+  ("阿越", lorem(36)),
+  ("蛋蛋", lorem(26)),
+  ("摩斯卡", lorem(32)),
+  ("阿越", lorem(24)),
+  ("蛋蛋", lorem(38)),
+  ("摩斯卡", lorem(28)),
+  ("阿越", lorem(34)),
+)
+#block(inset: 16pt)[
+  #for (who, body) in bubbles [
+    #block(width: 100%, above: 9pt)[
+      #text(size: 9pt, fill: rgb("#7c8aa0"), who)
+      #v(3pt)
+      #block(width: 88%, fill: rgb("#ffffff"), radius: 6pt, inset: 9pt, stroke: 0.5pt + rgb("#e2e8f0"))[
+        #text(size: 10.5pt, body)
+      ]
+    ]
+  ]
 ]
 """
 
@@ -183,7 +215,7 @@ SCENE_QUIET = {
 
 # 每个样张里「第几个话题配哪张占位图」
 SCENES = {
-    "full": (SCENE_FULL, {0: (SHOT_TERMINAL,), 1: (SHOT_CHART, SHOT_TERMINAL)}),
+    "full": (SCENE_FULL, {0: (SHOT_LONG,), 1: (SHOT_CHART, SHOT_TERMINAL)}),
     "light": (SCENE_LIGHT, {}),
     "quiet": (SCENE_QUIET, {}),
 }
@@ -225,12 +257,16 @@ def render_report(scene: str, out: Path, fonts: str, ppi: int) -> None:
             for si, source in enumerate(sources):
                 dst = img_dir / f"{ti}_{si}.png"
                 _compile_typst_source(source, dst, fonts, 140)
-                entries.append(
-                    {
-                        "path": f"img/{dst.name}",
-                        "caption": f"示例成员{si + 1} · 11-07 1{si + 2}:04 · 截图",
-                    }
-                )
+                entry = {
+                    "path": f"img/{dst.name}",
+                    "caption": f"示例成员{si + 1} · 11-07 1{si + 2}:04 · 截图",
+                }
+                # 与插件一致：超长竖图切段横排，并标记 wide 让它铺满宽度
+                composed = img_dir / f"{ti}_{si}_tall.png"
+                if compose_tall_image(dst, composed) == composed:
+                    entry["path"] = f"img/{composed.name}"
+                    entry["wide"] = True
+                entries.append(entry)
             payload["topics"][ti]["images"] = entries
         (job / "data.json").write_text(
             json.dumps(payload, ensure_ascii=False), encoding="utf-8"
