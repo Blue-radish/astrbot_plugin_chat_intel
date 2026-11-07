@@ -1800,7 +1800,7 @@ class TechDigestPlugin(Star):
             self._pending = (event.unified_msg_origin, since, until, label, incremental, gid, True)
             return "上一份还在生成，这份已经排队，跑完接着发。"
         if not self.group_ids:
-            return "插件还没配置要监控的群，先让主人填 group_ids。"
+            return "插件还没配置要监控的群，先让主人在「要总结的群」里加一行。"
 
         for _gid in self.group_ids:
             await self._group_name(_gid)  # 预热群名，否则按名字匹配不到群
