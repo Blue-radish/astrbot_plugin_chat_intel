@@ -405,14 +405,14 @@ def test_push_target_built_from_two_simple_fields():
 
 
 def test_push_target_accepts_legacy_full_string():
+    """老串不再由 build_push_target 兜底，而是迁移到两个可见字段（宿主会补默认值）。"""
     from conftest import load_main
 
     mod = load_main()
-    umo, err = mod.TechDigestPlugin.build_push_target(
-        {"push_umo": "bot_a:FriendMessage:110001"}
-    )
-    assert umo == "bot_a:FriendMessage:110001"
-    assert err == ""
+    cfg = {"push_umo": "bot_a:FriendMessage:110001"}
+    assert mod.TechDigestPlugin.build_push_target(cfg)[0] == ""
+    assert mod.TechDigestPlugin.migrate_push_target(cfg, {}) == "bot_a:FriendMessage:110001"
+    assert mod.TechDigestPlugin.build_push_target(cfg)[0] == "bot_a:FriendMessage:110001"
 
 
 def test_push_target_explains_what_is_missing():

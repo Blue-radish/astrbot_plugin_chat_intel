@@ -54,6 +54,7 @@ def test_execute_drains_queue_serially():
 
     p._run_daily_once = fake_daily
     p._generate_and_send = fake_gen
+    assert p._claim() is True
     asyncio.run(p._execute(("daily",)))
     assert seen[0][0] == "daily"
     assert seen[1][0] == "digest"
@@ -76,6 +77,7 @@ def test_execute_picks_up_request_queued_during_run():
 
     p._run_daily_once = fake_daily
     p._generate_and_send = fake_gen
+    assert p._claim() is True
     asyncio.run(p._execute(("daily",)))
     assert order == ["daily", "digest"]
     assert not p._queue
@@ -88,6 +90,7 @@ def test_execute_clears_busy_even_if_task_crashes():
         raise RuntimeError("模型挂了")
 
     p._run_daily_once = boom
+    assert p._claim() is True
     asyncio.run(p._execute(("daily",)))
     assert p._running is False
 
@@ -342,11 +345,12 @@ def test_clearing_visible_push_fields_disables_push():
 
 
 def test_legacy_only_config_still_works():
+    """老配置靠一次性迁移救回来，不是靠 build_push_target 兜底。"""
     from conftest import load_main
 
     mod = load_main()
-    umo, _ = mod.TechDigestPlugin.build_push_target({"push_umo": "bot_a:FriendMessage:1"})
-    assert umo == "bot_a:FriendMessage:1"
+    cfg = {"push_umo": "bot_a:FriendMessage:1"}
+    assert mod.TechDigestPlugin.migrate_push_target(cfg, {}) == "bot_a:FriendMessage:1"
 
 
 # ---------------------------------------------------------------- 定时时间规范化

@@ -99,7 +99,7 @@
     "type": "string",
     "description": "每天几点生成「最近 24 小时」报告（HH:MM，留空 = 不定时生成）",
     "default": "23:00",
-    "hint": "只负责定时生成；发不发出去由「自动推送」开关决定。时间是本机时区，填 9:00 这种写法不会被识别，请写 09:00"
+    "hint": "只负责定时生成；发不发出去由「自动推送」开关决定。时间是本机时区，写 9:00 会自动补成 09:00；看不懂或越界（比如 25:99）会关掉定时并在日志里说明"
   },
   "push_enabled": {
     "type": "bool",
@@ -139,6 +139,12 @@
     "type": "string",
     "description": "不统计的 QQ 号，逗号分隔（一般填机器人自己）",
     "default": ""
+  },
+  "platform_id": {
+    "type": "string",
+    "description": "（已废弃）旧的全局读取账号：升级时会自动补进没填「读取账号」的群，之后可以留空",
+    "default": "",
+    "invisible": true
   },
   "silence_platforms": {
     "type": "string",

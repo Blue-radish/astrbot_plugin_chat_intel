@@ -133,7 +133,7 @@ TECH_HINTS = (
 
 SYSTEM_PROMPT = """你在给群友写一份私人情报简报。文字克制、具体、可执行。"""
 
-@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递", "2.2.2")
+@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递", "2.2.4")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -190,11 +190,14 @@ class TechDigestPlugin(Star):
         self.template = Path(__file__).parent / "templates" / "report.typ"
         self.state_path = self.data_dir / "state.json"
         self.state = self._load_state()
+        # 老配置的一次性迁移（必须在读状态之后：标记存在状态文件里）
+        self._migrate_legacy_config()
 
         self._transcript_cache: tuple[list[dict], str] = ([], "")
         self._task: asyncio.Task | None = None
         self._last_run_date: str | None = None
         self._running = False
+        self._running_since = 0.0
 
         fonts = [
             f.name
@@ -291,17 +294,15 @@ class TechDigestPlugin(Star):
         """把「发信账号 + 收件人 QQ 号」拼成会话 id，返回 (会话 id, 错误说明)。
 
         两个输入框是给人和给校验看的；拼出来的会话 id 才交给推送层。
-        旧配置里整串的 push_umo 继续认（不填两个框时就用它）。
+        旧的整串 push_umo 不在这里兜底：宿主加载配置时会给缺失字段补空串，
+        靠「字段存不存在」区分不了「老配置」和「用户主动清空」，
+        所以老配置走 migrate_push_target() 一次性搬进这两个字段。
         """
         config = config or {}
         platform = str(config.get("push_platform") or "").strip()
         uid = str(config.get("push_uid") or "").strip()
-        legacy = str(config.get("push_umo") or "").strip()
-        # 新字段「存在但为空」= 用户在界面上清空了，就是明确不要推送，
-        # 不能偷偷回落到那条已经隐藏的旧值；只有旧配置里压根没有新字段时才用旧串。
-        has_new_keys = "push_platform" in config or "push_uid" in config
         if not platform and not uid:
-            return ("" if has_new_keys else legacy), ""
+            return "", ""
         if not platform:
             return "", "填了收件人 QQ 号，但没填「用哪个机器人发」"
         if not uid:
@@ -309,6 +310,61 @@ class TechDigestPlugin(Star):
         if not uid.isdigit():
             return "", f"收件人 QQ 号「{uid}」不是纯数字"
         return f"{platform}:FriendMessage:{uid}", ""
+
+    @staticmethod
+    def migrate_push_target(config: dict, state: dict) -> str:
+        """老配置的一次性迁移：把整串 push_umo 拆进两个可见字段。
+
+        宿主（AstrBotConfig）加载时会按 schema 补齐默认值，所以「新字段存在」不代表用户
+        填过；只能用状态文件里的一次性标记判断是否已经迁过。
+        返回迁移后的推送目标（没有就是空串）。
+        """
+        config = config or {}
+        if state is None:
+            state = {}
+        if state.get("config_migrated_v224"):
+            return TechDigestPlugin.build_push_target(config)[0]
+        legacy = str(config.get("push_umo") or "").strip()
+        platform = str(config.get("push_platform") or "").strip()
+        uid = str(config.get("push_uid") or "").strip()
+        if legacy and not platform and not uid:
+            parsed = TechDigestPlugin._parse_umo(legacy)
+            if parsed:
+                plat, _mtype, target = parsed
+                if target.isdigit():
+                    try:
+                        config["push_platform"] = plat
+                        config["push_uid"] = target
+                    except Exception as e:
+                        logger.warning(f"[{PLUGIN_NAME}] 迁移推送目标失败: {e}")
+                    else:
+                        logger.warning(
+                            f"[{PLUGIN_NAME}] 旧推送目标「{legacy}」已搬进"
+                            f"「发信账号 {plat} / 收件人 QQ {target}」两个字段；"
+                            "以后在设置里清空就真的不推送了"
+                        )
+        state["config_migrated_v224"] = True
+        return TechDigestPlugin.build_push_target(config)[0]
+
+    @staticmethod
+    def migrate_chat_platforms(rows, legacy_id: str) -> list[str]:
+        """老配置的全局 platform_id 补进没填「读取账号」的群行，返回补过的群号。
+
+        已有单群设置保持优先；没有群号的行不动。
+        """
+        legacy = str(legacy_id or "").strip()
+        if not legacy:
+            return []
+        filled: list[str] = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            gid = str(row.get("gid") or "").strip()
+            if not gid or str(row.get("platform") or "").strip():
+                continue
+            row["platform"] = legacy
+            filled.append(gid)
+        return filled
 
     def _parse_group_ids(self) -> list[str]:
         """兼容老配置里的 group_ids（字符串或列表），新配置走 chats。"""
@@ -363,15 +419,14 @@ class TechDigestPlugin(Star):
                 return chat
         return None
 
-    @staticmethod
     def _chat_status_line(
-        chat: ChatInterest, name: str, count: int, imgs: int, last: str
+        self, chat: ChatInterest, name: str, count: int, imgs: int, last: str = ""
     ) -> str:
         """状态里每个群一行：谁在采集、今天多少条、上次覆盖到哪。"""
         parts = [f"{name}（{chat.gid}）"]
         parts.append(f"读历史用 {chat.platform}" if chat.platform else "⚠ 没填读取账号")
         parts.append(f"今日 {count} 条 / 带图 {imgs} 条")
-        parts.append(f"上次报告覆盖到 {last or '还没生成过'}")
+        parts.append(self._last_report_desc(chat.gid))
         if chat.tags_pos:
             parts.append(f"标签 {len(chat.tags_pos)} 个")
         else:
@@ -546,7 +601,7 @@ class TechDigestPlugin(Star):
             f"[{PLUGIN_NAME}] 直通 {intent.kind}：范围={label} 增量={incremental} "
             f"群={gid or '全部'} 命中「{intent.anchor}+{intent.action}」原文「{text}」"
         )
-        if self._running:
+        if not self._claim():
             if self._enqueue(("digest", umo, since, until, label, incremental, gid, True)):
                 await self._send_text(umo, "上一份还在生成，这份先排队，跑完接着来。")
             else:
@@ -563,15 +618,36 @@ class TechDigestPlugin(Star):
         self._queue.append(request)
         return True
 
-    async def _execute(self, request: tuple) -> None:
-        """唯一的生成执行入口：置忙 → 跑 → 清忙 → 接着吃队列里的下一份。
+    def _claim(self) -> bool:
+        """同步抢占执行位：返回 True 表示这份由我来跑。
 
-        定时任务、自然语言入口、模型工具都走这里。以前三条路径各自置忙/排空，
-        结果「队列里的定时」跑的时候 `_running` 是 False（能并发），而且定时跑完
-        不再排空队列，后面排着的请求会一直躺着。
+        「看忙不忙」和「置忙」之间不能有 await，否则两次几乎同时的调用会都看到空闲、
+        各起一个后台任务（模型工具就是这样撞的）。所以提交时就地占位，再起任务。
+        """
+        if self._running:
+            return False
+        self._running = True
+        self._running_since = time.time()
+        return True
+
+    def _release_stale_claim(self, limit: float = 3600.0) -> bool:
+        """兜底：任务被取消导致占位没释放时，超过 limit 秒强制放掉。"""
+        if not self._running:
+            return False
+        if time.time() - float(self._running_since or 0) < limit:
+            return False
+        logger.error(
+            f"[{PLUGIN_NAME}] 执行位被占了 {int(limit)} 秒以上（任务可能被中断），强制释放"
+        )
+        self._running = False
+        return True
+
+    async def _execute(self, request: tuple) -> None:
+        """唯一的生成执行入口：跑 → 清忙 → 接着吃队列里的下一份。
+
+        进入这里时执行位已经由 `_claim()` 同步占上；之后每吃完一份都要重新抢一次。
         """
         while True:
-            self._running = True
             try:
                 if request and request[0] == "daily":
                     await self._run_daily_once()
@@ -584,13 +660,15 @@ class TechDigestPlugin(Star):
             if not self._queue:
                 return
             request = self._queue.popleft()
+            self._running = True
+            self._running_since = time.time()
             logger.info(
                 f"[{PLUGIN_NAME}] 接着跑排队的任务（队列还剩 {len(self._queue)} 份）"
             )
 
     async def _drain_pending(self) -> None:
         """把排队的第一份接着跑掉（跑完会继续吃后面的）。"""
-        if not self._queue:
+        if not self._queue or not self._claim():
             return
         await self._execute(self._queue.popleft())
 
@@ -868,6 +946,15 @@ class TechDigestPlugin(Star):
         if len(out) > self.max_messages:
             out = out[-self.max_messages :]
         return out
+
+    def _merge_records(self, local: list[dict], history: list[dict]) -> list[dict]:
+        """本地记录 + 历史记录：按消息 id 去重（撞键合并图片）、按时间排序、留最新 N 条。
+
+        顺序很重要：本地记录是最新的，历史记录是补回来的旧的；不排序直接截尾会把最新的丢掉。
+        """
+        merged = self._dedupe_records(list(local) + list(history))
+        merged.sort(key=lambda r: int(r.get("t") or 0))
+        return merged[-self.max_messages :]
 
     @staticmethod
     def _dedupe_records(records: list[dict]) -> list[dict]:
@@ -1930,8 +2017,9 @@ class TechDigestPlugin(Star):
         if len(records) < 20:
             history = await self._fetch_history(gid, real_since, until)
             if history:
-                # 走同一套去重（按消息 id，撞键合并图片），不再另搞一套分钟级指纹
-                records = self._dedupe_records(records + history)[-self.max_messages :]
+                records = self._merge_records(records, history)
+        records.sort(key=lambda r: int(r.get("t") or 0))
+        records = records[-self.max_messages :]
 
         if not records:
             return None, f"{group_name}：{label}没有消息", False
@@ -1970,6 +2058,10 @@ class TechDigestPlugin(Star):
 
         topics = self._describe_topics(data.get("topics") or [], records)
         if not topics:
+            # 完整跑完但一条都没命中：也要把游标推上去，否则「看最新」每次都会重跑同一批消息
+            if incremental and not incomplete:
+                self._group_state(gid)["last_ts"] = int(until)
+                self._save_state()
             return None, f"{group_name}：{label}没有命中标签的话题", False
 
         topic_images = await self._images_for_topics(records, topics, chat)
@@ -2139,7 +2231,7 @@ class TechDigestPlugin(Star):
                     today = now.strftime("%Y-%m-%d")
                     if now.strftime("%H:%M") == self.daily_time and self._last_run_date != today:
                         logger.info(f"[{PLUGIN_NAME}] 定时任务触发 {self.daily_time}")
-                        if self._running:
+                        if not self._claim():
                             # 忙碌时排队，别把今天这一份直接丢掉
                             if self._enqueue(("daily",)):
                                 self._last_run_date = today
@@ -2157,6 +2249,7 @@ class TechDigestPlugin(Star):
                 raise
             except Exception as e:
                 logger.error(f"[{PLUGIN_NAME}] 定时任务异常: {e}", exc_info=True)
+            self._release_stale_claim()
             await asyncio.sleep(30)
 
     async def _run_daily_once(self) -> None:
@@ -2313,14 +2406,19 @@ class TechDigestPlugin(Star):
             gid,
             True,
         )
-        if self._running:
+        if not self._claim():
             if self._enqueue(request):
                 return "上一份还在生成，这份已经排队，跑完接着发。"
             return "已经在跑一份、后面还排着队了，等它们跑完再叫我。"
 
-        # 生成可能要好几分钟，先立刻回话，图由后台任务直接发到聊天里
+        # 生成可能要好几分钟，先立刻回话，图由后台任务直接发到聊天里。
+        # 执行位已经在这行之前同步占上了，所以连点两次也不会同时起两份。
         event.set_extra("chat_intel_tool_sent", True)
-        asyncio.create_task(self._execute(request))
+        try:
+            asyncio.create_task(self._execute(request))
+        except Exception:
+            self._running = False
+            raise
         target = "全部群" if gid is None else (
             self.group_name_map.get(gid) or f"群 {gid}"
         )
@@ -2331,6 +2429,19 @@ class TechDigestPlugin(Star):
             f"已在后台开始生成（范围：{label}，目标：{target}），"
             "报告图会直接发到聊天里。不要再用文字复述或总结，保持沉默即可。"
         )
+
+    def _last_report_desc(self, gid: str) -> str:
+        """状态行里「上次生成」的口径：看真实生成时间，不看增量游标。"""
+        group_state = self._group_state(gid)
+        ts = int(float(group_state.get("last_report_ts") or 0))
+        if not ts:
+            return "上次生成 还没生成过"
+        when = datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")
+        rng = str(group_state.get("last_range") or "").strip()
+        desc = f"上次生成 {when}" + (f"（{rng}）" if rng else "")
+        if group_state.get("last_incomplete"):
+            desc += " · 内容不完整"
+        return desc
 
     async def _status_lines(self) -> list[str]:
         lines: list[str] = []
@@ -2356,7 +2467,7 @@ class TechDigestPlugin(Star):
             else:
                 lines.append(
                     f"{name}（{gid}）：今日 {len(today_records)} 条 / 带图 {imgs} 条 · "
-                    f"上次报告覆盖到 {last}"
+                    f"{self._last_report_desc(gid)}"
                 )
         parsed = self._parse_umo(self.push_umo)
         send_desc = (
@@ -2418,6 +2529,50 @@ class TechDigestPlugin(Star):
                 await self.context.send_message(umo, MessageChain().message(f"生成失败：{e}"))
             except Exception:
                 pass
+
+    def _migrate_legacy_config(self) -> None:
+        """把老配置里隐藏的旧值搬进可见字段，只做一次。"""
+        if self.state.get("config_migrated_v224"):
+            return
+        before = (
+            str(self.config.get("push_platform") or ""),
+            str(self.config.get("push_uid") or ""),
+        )
+        self.migrate_push_target(self.config, self.state)
+        after = (
+            str(self.config.get("push_platform") or ""),
+            str(self.config.get("push_uid") or ""),
+        )
+        target = after[0] and after[1]
+        filled = self.migrate_chat_platforms(
+            self.config.get("chats"), getattr(self, "legacy_platform_id", "")
+        )
+        if filled:
+            logger.warning(
+                f"[{PLUGIN_NAME}] 这些群原来靠全局 platform_id 读历史，已补进「读取账号」："
+                f"{filled}；建议在设置里改成明确的账号"
+            )
+        migrated = (after != before) or bool(filled)
+        if migrated and not self._save_config():
+            logger.error(
+                f"[{PLUGIN_NAME}] 迁移结果写不回配置文件，下次启动会再试一次"
+            )
+        # 迁移可能改了 config，重新按最终值算一遍
+        if filled:
+            self._apply_chats(self.config.get("chats"))
+        self.push_umo, self._push_cfg_error = self.build_push_target(self.config)
+
+    def _save_config(self) -> bool:
+        """把内存里的 config 落盘（AstrBot 的 AstrBotConfig 才有 save_config）。"""
+        saver = getattr(self.config, "save_config", None)
+        if saver is None:
+            return True  # 普通 dict：内存里改完就算数
+        try:
+            saver()
+            return True
+        except Exception as e:
+            logger.warning(f"[{PLUGIN_NAME}] 配置保存失败: {e}")
+            return False
 
     # ------------------------------------------------------------------ 过期清理
     def _prune_old_files(self) -> None:
