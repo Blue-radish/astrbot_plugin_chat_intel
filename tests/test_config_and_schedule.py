@@ -157,4 +157,4 @@ def test_chats_template_declares_one_template():
     chat = schema["chats"]
     assert chat["type"] == "template_list"
     assert "chat" in chat["templates"]
-    assert {"gid", "want"} <= set(chat["templates"]["chat"]["items"])
+    assert {"gid", "tags_pos"} <= set(chat["templates"]["chat"]["items"])

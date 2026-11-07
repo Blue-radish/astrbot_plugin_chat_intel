@@ -27,22 +27,17 @@
             "description": "这份报告的标题（留空用全局标题）",
             "default": ""
           },
-          "want": {
+          "tags_pos": {
             "type": "text",
-            "description": "想要的主题：一行一条，报告按这些主题分节",
+            "description": "关心的标签：一行一个（或逗号分隔），比如 电脑、动漫、科研",
             "default": "",
-            "hint": "例如 复古计算机与老式硬件 / 电子元件行情与价格 / 维修与改装经验"
+            "hint": "只有打了这些标签的话题才会进报告；写具体些更准，例如 本地部署大模型、复古硬件维修"
           },
-          "not_want": {
+          "tags_neg": {
             "type": "text",
-            "description": "不要的主题：一行一条（可空）",
+            "description": "不要的标签：一行一个（可空）",
             "default": "",
-            "hint": "例如 手机数码开箱 / 二手交易砍价"
-          },
-          "keywords": {
-            "type": "string",
-            "description": "关键词示例（可选，只作提示，不做硬匹配）",
-            "default": ""
+            "hint": "例如 二手交易、砍价、开箱晒单"
           }
         }
       }

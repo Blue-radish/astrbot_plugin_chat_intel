@@ -1,6 +1,7 @@
 // 群聊情报 —— 单页长图模板（Typst）
 // 渲染时会把模板复制到临时任务目录，并把数据写成同目录的 data.json
-// 分节跟着配置里「想要的主题」走：sections = [["主题原文", [条目...]], ...]
+// 主体是「话题卡」：topics = [{title, time, members, tags, summary, count}, ...]
+// 一个话题 = 群友自己聊出来的一件事（不是配置里的主题），兴趣只负责筛。
 #let d = json("data.json")
 
 #let ink = rgb("#131a26")
@@ -17,7 +18,7 @@
 #let c5 = rgb("#a03a5a")
 #let palette = (c1, c2, c3, c4, c5)
 
-#let sections = d.at("sections", default: ())
+#let topics = d.at("topics", default: ())
 #let quotes = d.at("quotes", default: ())
 #let stats = d.at("stats", default: (:))
 #let shots = d.at("images", default: ())
@@ -57,19 +58,42 @@
   ]
 ]
 
-// ============ 按兴趣点分节 ============
-#for (si, s) in sections.enumerate() [
-  #let items = s.at(1)
-  #if items.len() > 0 [
-    #sec(palette.at(calc.min(si, palette.len() - 1)), s.at(0))
-    #for t in items [
-      #block(width: 100%, fill: card, radius: 5pt, inset: (x: 10pt, y: 8pt), stroke: 0.5pt + hair, below: 6pt)[
-        #text(size: 9.5pt, weight: "bold", t.at("topic", default: ""))
-        #if t.at("detail", default: "") != "" [
-          #v(3pt)
-          #linebreak()
-          #text(size: 9.5pt, fill: body-ink, t.at("detail", default: ""))
+// ============ 话题卡 ============
+#for (ti, t) in topics.enumerate() [
+  #let accent = palette.at(calc.min(ti, palette.len() - 1))
+  #block(width: 100%, fill: card, radius: 5pt, inset: (x: 11pt, y: 9pt), stroke: 0.5pt + hair, below: 8pt, above: 8pt)[
+    // 标题
+    #block(below: 0pt)[
+      #text(size: 11pt, weight: "bold", t.at("title", default: ""))
+    ]
+    // 标签
+    #if t.at("tags", default: ()).len() > 0 [
+      #block(above: 6pt, below: 6pt)[
+        #for tag in t.at("tags") [
+          #box(
+            fill: accent,
+            radius: 3pt,
+            inset: (x: 5pt, y: 1pt),
+            height: 13pt,
+            text(size: 7.5pt, fill: white, tag)
+          )
+          #h(4pt)
         ]
+      ]
+    ]
+    // 元信息行：时间 · 参与人
+    #let meta-parts = ()
+    #if t.at("time", default: "") != "" [#meta-parts.push("时间：" + t.at("time"))]
+    #if t.at("members", default: "") != "" [#meta-parts.push("群成员：" + t.at("members"))]
+    #if meta-parts.len() > 0 [
+      #block(above: 5pt, below: 0pt)[
+        #text(size: 8pt, fill: faint, meta-parts.join("　·　"))
+      ]
+    ]
+    // 事件讲述
+    #if t.at("summary", default: "") != "" [
+      #block(above: 6pt, below: 0pt)[
+        #text(size: 9.5pt, fill: body-ink, t.at("summary", default: ""))
       ]
     ]
   ]
@@ -115,11 +139,10 @@
 ]
 
 // ============ 全空兜底 ============
-#let total = sections.fold(0, (acc, s) => acc + s.at(1).len())
-#if total + quotes.len() + shots.len() == 0 [
+#if topics.len() + quotes.len() + shots.len() == 0 [
   #v(10pt)
   #block(width: 100%, fill: card, radius: 5pt, inset: 14pt, stroke: 0.5pt + hair)[
-    #text(size: 10pt, fill: sub, "这段时间群里没有符合这些兴趣点的内容。")
+    #text(size: 10pt, fill: sub, "这段时间群里没有命中这些标签的话题。")
   ]
 ]
 

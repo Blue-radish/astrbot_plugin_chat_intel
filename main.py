@@ -37,9 +37,12 @@ try:  # 插件以包形式被 AstrBot 加载时走相对导入
         ChatInterest,
         build_digest_prompt,
         build_vision_prompt,
-        group_sections,
         interest_fingerprint,
+        merge_topics,
+        normalize_topics,
         parse_chats,
+        topic_members,
+        topic_time_range,
     )
 except ImportError:  # pragma: no cover - 单测按文件路径加载模块
     from intent import detect_intent
@@ -47,9 +50,12 @@ except ImportError:  # pragma: no cover - 单测按文件路径加载模块
         ChatInterest,
         build_digest_prompt,
         build_vision_prompt,
-        group_sections,
         interest_fingerprint,
+        merge_topics,
+        normalize_topics,
         parse_chats,
+        topic_members,
+        topic_time_range,
     )
 
 try:  # 简繁归一化：群名可能是繁体，用户打的是简体
@@ -111,7 +117,7 @@ TECH_HINTS = (
 
 SYSTEM_PROMPT = """你在给群友写一份私人情报简报。文字克制、具体、可执行。"""
 
-@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份兴趣，按兴趣总结群聊，视觉模型筛图，本地排版成图，静默私聊投递", "2.0.0")
+@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递", "2.1.0")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -212,10 +218,10 @@ class TechDigestPlugin(Star):
         if not self.group_ids:
             logger.warning(f"[{PLUGIN_NAME}] 还没配置 chats（群），生成前请先在设置里加群")
         else:
-            no_want = [c.gid for c in self.chats if not c.want]
+            no_want = [c.gid for c in self.chats if not c.tags_pos]
             if no_want:
                 logger.warning(
-                    f"[{PLUGIN_NAME}] 这些群还没配置「想要的主题」，生成时会跳过：{no_want}"
+                    f"[{PLUGIN_NAME}] 这些群还没配置「关心的标签」，生成时会跳过：{no_want}"
                 )
 
     # ------------------------------------------------------------------ 配置解析
@@ -261,10 +267,10 @@ class TechDigestPlugin(Star):
         parts.append(f"采集 {chat.platform or '未配置'}")
         parts.append(f"今日 {count} 条 / 带图 {imgs} 条")
         parts.append(f"上次报告覆盖到 {last or '还没生成过'}")
-        if chat.want:
-            parts.append(f"兴趣 {len(chat.want)} 条")
+        if chat.tags_pos:
+            parts.append(f"标签 {len(chat.tags_pos)} 个")
         else:
-            parts.append("⚠ 未配置兴趣")
+            parts.append("⚠ 未配置标签")
         return " · ".join(parts)
 
     # ------------------------------------------------------------------ 状态
@@ -1117,11 +1123,10 @@ class TechDigestPlugin(Star):
         return out
 
     def _merge_parts(self, parts: list[dict], chat: ChatInterest) -> dict:
-        """合并各分片的条目，按该群的兴趣分节；跨块重复的条目只留一条。"""
+        """合并各分片的话题：跨块重复的并成一条，金句去重。"""
         headline = ""
-        items: list[dict] = []
+        topic_groups: list[list[dict]] = []
         quotes: list[dict] = []
-        seen_items: set[tuple] = set()
         seen_quotes: set[str] = set()
 
         for part in parts:
@@ -1129,26 +1134,7 @@ class TechDigestPlugin(Star):
                 continue
             if not headline:
                 headline = str(part.get("headline") or "").strip()
-            for item in part.get("items") or []:
-                if not isinstance(item, dict):
-                    continue
-                topic = str(item.get("topic") or "").strip()
-                if not topic:
-                    continue
-                detail = str(item.get("detail") or "").strip()
-                key = (topic[:20], detail[:20])
-                if key in seen_items:
-                    continue
-                seen_items.add(key)
-                items.append(
-                    {
-                        "msg_no": item.get("msg_no"),
-                        "want_item": str(item.get("want_item") or "").strip(),
-                        "topic": topic,
-                        "detail": detail,
-                        "kind": str(item.get("kind") or "").strip(),
-                    }
-                )
+            topic_groups.append(part.get("topics") or [])
             for quote in part.get("quotes") or []:
                 if not isinstance(quote, dict):
                     continue
@@ -1164,26 +1150,69 @@ class TechDigestPlugin(Star):
                     }
                 )
 
-        sections, truncated = group_sections(chat, items)
         return {
             "headline": headline,
-            "sections": sections,
-            "items": items,
+            "topics": merge_topics(chat, topic_groups),
             "quotes": quotes[:CAP_QUOTES],
-            "truncated": truncated,
         }
 
+    @staticmethod
+    def _payload_topics(topics: list[dict]) -> list[dict]:
+        """交给模板的话题结构。
+
+        tags 必须保持成数组：模板按数组逐个渲染标签，一旦在 Python 侧拼成「甲、乙」字符串，
+        模板就会把它当字符串逐字拆开，渲染成一字一个标签块。
+        """
+        out: list[dict] = []
+        for topic in topics:
+            title = str(topic.get("title") or "").strip()
+            if not title:
+                continue
+            raw_tags = topic.get("tags") or []
+            out.append(
+                {
+                    "title": title,
+                    "tags": [str(tag) for tag in raw_tags]
+                    if isinstance(raw_tags, (list, tuple))
+                    else [],
+                    "time": str(topic.get("time") or ""),
+                    "members": str(topic.get("members") or ""),
+                    "summary": str(topic.get("summary") or ""),
+                    "count": int(topic.get("count") or 0),
+                }
+            )
+        return out
+
+    @staticmethod
+    def _describe_topics(topics: list[dict], records: list[dict]) -> list[dict]:
+        """给每个话题算出时间范围和参与人：用模型给的消息编号回查原始记录，不靠模型自己写。"""
+        out: list[dict] = []
+        for topic in topics:
+            nums = [n for n in topic.get("msg_nos") or [] if 0 <= n < len(records)]
+            picked = [records[n] for n in nums]
+            out.append(
+                {
+                    "title": topic.get("title") or "",
+                    "tags": topic.get("tags") or [],
+                    "summary": topic.get("summary") or "",
+                    "time": topic_time_range([int(r.get("t") or 0) for r in picked]),
+                    "members": topic_members([str(r.get("name") or "") for r in picked]),
+                    "count": len(picked),
+                }
+            )
+        return out
+
     # ------------------------------------------------------------------ 图片挑选
-    async def _alert_missing_want(self, group_name: str, gid: str) -> None:
-        """某个群没配「想要的主题」时私聊提醒一次，不反复骚扰。"""
-        key = f"warned_want_{gid}"
+    async def _alert_missing_tags(self, group_name: str, gid: str) -> None:
+        """某个群没配关心的标签时私聊提醒一次，不反复骚扰。"""
+        key = f"warned_tags_{gid}"
         if self.state.get(key):
             return
         self.state[key] = int(time.time())
         self._save_state()
         text = (
-            f"⚠ {group_name} 还没配置「想要的主题」，这次跳过了。\n"
-            f"在插件设置 → 要总结的群 → 这个群的「想要的主题」里加几行就行。"
+            f"⚠ {group_name} 还没配置「关心的标签」，这次跳过了。\n"
+            f"在插件设置 → 要总结的群 → 这个群的「关心的标签」里填几个词（比如 电脑、动漫、科研）就行。"
         )
         try:
             await self._push_text(text)
@@ -1411,10 +1440,10 @@ class TechDigestPlugin(Star):
                 f"本条={str(rec.get('text') or '(无文字)')[:80]} "
                 f"上文={cand['prev'][-60:] or '(无)'} 下文={cand['next'][:60] or '(无)'}"
             )
-        want_txt = "、".join(chat.want) if chat and chat.want else "技术相关内容"
+        want_txt = "、".join(chat.tags_pos) if chat and chat.tags_pos else "技术相关内容"
         prompt = IMAGE_PICK_PROMPT.format(
             limit=self.max_images, items="\n".join(lines)
-        ) + f"\n\n这个群想要的主题：{want_txt}。只挑与这些主题有关的图。"
+        ) + f"\n\n这个群关心的标签：{want_txt}。只挑与这些标签有关的图。"
         try:
             resp = await provider.text_chat(
                 prompt=prompt,
@@ -1443,7 +1472,7 @@ class TechDigestPlugin(Star):
         candidates: list[dict], chat: ChatInterest | None = None
     ) -> list[int]:
         scored: list[tuple[int, int]] = []
-        keywords = [w.lower() for w in (chat.keywords if chat else ()) if w]
+        keywords = [w.lower() for w in (chat.tags_pos if chat else ()) if w]
         for i, cand in enumerate(candidates):
             rec = cand["rec"]
             text = (
@@ -1514,11 +1543,11 @@ class TechDigestPlugin(Star):
         chat = self._chat(gid)
         if chat is None:
             return None, f"群 {gid} 不在配置里", True
-        if not chat.want:
+        if not chat.tags_pos:
             group_name = await self._group_name(gid)
-            await self._alert_missing_want(group_name, gid)
+            await self._alert_missing_tags(group_name, gid)
             # 已经在上面私聊提醒过了，这里不再当成"出错"再喊一遍
-            return None, f"{group_name}：这个群还没配置「想要的主题」，跳过", False
+            return None, f"{group_name}：这个群还没配置「关心的标签」，跳过", False
         real_since = self._resolve_since(gid, since, incremental, until)
         group_name = await self._group_name(gid)
 
@@ -1564,8 +1593,9 @@ class TechDigestPlugin(Star):
         if not self.keep_quotes:
             quotes = []
 
-        sections = data.get("sections") or []
-        flat_items = [item for _title, bucket in sections for item in bucket]
+        topics = self._describe_topics(data.get("topics") or [], records)
+        if not topics:
+            return None, f"{group_name}：{label}没有命中标签的话题", False
 
         images = await self._select_images(records, chat)
 
@@ -1575,13 +1605,10 @@ class TechDigestPlugin(Star):
             "date": now.strftime("%Y-%m-%d"),
             "group": group_name,
             "stats": {
-                "line": (
-                    f"{len(records)} 条消息 · 采纳 {len(flat_items)} 条 · "
-                    f"上限截断 {data.get('truncated') or 0} 条 · {label}"
-                ),
+                "line": f"{len(records)} 条消息 · {len(topics)} 个话题 · {label}",
             },
             "headline": str(data.get("headline") or "").strip(),
-            "sections": sections,
+            "topics": self._payload_topics(topics),
             "quotes": self._norm_list(quotes, ("content", "sender", "reason")),
             "footer": f"生成于 {now:%Y-%m-%d %H:%M} · {PLUGIN_NAME} · 本报告不会发到群里",
         }
@@ -1595,11 +1622,12 @@ class TechDigestPlugin(Star):
         self._group_state(gid)["last_report"] = path.name
         self._save_state()
 
-        section_desc = "、".join(f"{title} {len(bucket)}" for title, bucket in sections) or "无"
+        tag_desc = "、".join(
+            sorted({tag for topic in topics for tag in topic["tags"]})
+        ) or "无"
         info = (
-            f"[{group_name}] {label}：{len(records)} 条 / 采纳 {len(flat_items)} 条"
-            f"（{section_desc}）· 截断 {data.get('truncated') or 0} 条 · "
-            f"金句 {len(payload['quotes'])} · 图 {len(payload['images'])}"
+            f"[{group_name}] {label}：{len(records)} 条 / {len(topics)} 个话题"
+            f"（标签 {tag_desc}）· 金句 {len(payload['quotes'])} · 图 {len(payload['images'])}"
             + (f" · {len(chunks)} 段" if len(chunks) > 1 else "")
         )
         logger.info(f"[{PLUGIN_NAME}] {info} -> {path.name}")

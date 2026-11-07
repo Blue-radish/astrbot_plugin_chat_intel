@@ -22,12 +22,12 @@ def test_image_dims_on_missing_file_returns_zeros(tmp_path):
     assert p._image_dims(tmp_path / "nope.png") == (0, 0)
 
 
-def test_alert_missing_want_is_bound_method_and_warns_once():
+def test_alert_missing_tags_is_bound_method_and_warns_once():
     """缺 want 的告警是普通方法，且同一个群只提醒一次。"""
     p, mod = make_plugin()
     assert not isinstance(
-        inspect.getattr_static(mod.TechDigestPlugin, "_alert_missing_want"), staticmethod
-    ), "_alert_missing_want 被 @staticmethod 包住了"
+        inspect.getattr_static(mod.TechDigestPlugin, "_alert_missing_tags"), staticmethod
+    ), "_alert_missing_tags 被 @staticmethod 包住了"
     pushed: list[str] = []
 
     async def fake_push(text: str) -> None:
@@ -37,7 +37,7 @@ def test_alert_missing_want_is_bound_method_and_warns_once():
     p._save_state = lambda: None
     p.state = {}
 
-    asyncio.run(p._alert_missing_want("某群", "123"))
-    asyncio.run(p._alert_missing_want("某群", "123"))
+    asyncio.run(p._alert_missing_tags("某群", "123"))
+    asyncio.run(p._alert_missing_tags("某群", "123"))
     assert len(pushed) == 1
-    assert "想要的主题" in pushed[0]
+    assert "关心的标签" in pushed[0]

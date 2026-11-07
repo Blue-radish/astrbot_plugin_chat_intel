@@ -1,89 +1,135 @@
 from interest import (
     ChatInterest,
     build_digest_prompt,
-    group_sections,
+    build_vision_prompt,
     interest_fingerprint,
+    merge_topics,
+    normalize_topics,
     parse_chats,
+    topic_members,
+    topic_time_range,
 )
 
 RAW = [
     {
         "gid": "220001",
         "platform": "bot_b",
-        "want": "复古硬件\n元件行情\n\n复古硬件",
-        "not_want": "手机开箱",
-        "keywords": "PCB, 电容",
+        "tags_pos": "复古硬件\n元件行情\n\n复古硬件",
+        "tags_neg": "手机开箱",
     },
-    {"gid": "220001", "platform": "bot_a", "want": "重复行应被丢弃"},
-    {"gid": "220002", "want": "AI 工具", "not_want": ""},
-    {"gid": "", "want": "空群号应被跳过"},
+    {"gid": "220001", "platform": "bot_a", "tags_pos": "重复行应被丢弃"},
+    {"gid": "220002", "tags_pos": "AI 工具", "tags_neg": ""},
+    {"gid": "", "tags_pos": "空群号应被跳过"},
 ]
 
 
 def test_parse_chats_trims_and_dedupes():
     chats, skipped = parse_chats(RAW, fallback_platform="bot_b")
     assert [c.gid for c in chats] == ["220001", "220002"]
-    assert chats[0].want == ("复古硬件", "元件行情")
-    assert chats[0].keywords == ("PCB", "电容")
+    assert chats[0].tags_pos == ("复古硬件", "元件行情")
     assert chats[0].platform == "bot_b"
     assert chats[1].platform == "bot_b"  # 回退到 fallback
-    assert chats[0].not_want == ("手机开箱",)
-    assert chats[1].not_want == ()
+    assert chats[0].tags_neg == ("手机开箱",)
+    assert chats[1].tags_neg == ()
     assert skipped == [""]
 
 
+def test_parse_chats_accepts_comma_and_legacy_want():
+    """顿号、逗号都能分；旧配置里的 want 长句也能直接当标签用。"""
+    chats, _ = parse_chats(
+        [{"gid": "1", "tags_pos": "电脑、动漫,科研"}, {"gid": "2", "want": "复古硬件\n维修"}]
+    )
+    assert chats[0].tags_pos == ("电脑", "动漫", "科研")
+    assert chats[1].tags_pos == ("复古硬件", "维修")
+
+
 def test_fingerprint_ignores_order_but_not_content():
-    a = ChatInterest("1", "p", ("甲", "乙"), (), (), "", "")
-    b = ChatInterest("1", "p", ("乙", "甲"), (), (), "", "")
-    c = ChatInterest("1", "p", ("甲", "乙", "丙"), (), (), "", "")
+    a = ChatInterest("1", "p", ("甲", "乙"), (), "", "")
+    b = ChatInterest("1", "p", ("乙", "甲"), (), "", "")
+    c = ChatInterest("1", "p", ("甲", "乙", "丙"), (), "", "")
     assert interest_fingerprint(a) == interest_fingerprint(b)
     assert interest_fingerprint(a) != interest_fingerprint(c)
     assert len(interest_fingerprint(a)) == 12
 
 
 def test_prompt_puts_rules_after_transcript():
-    chat = ChatInterest("1", "p", ("复古硬件",), ("手机开箱",), ("PCB",), "", "")
+    chat = ChatInterest("1", "p", ("复古硬件",), ("手机开箱",), "", "")
     prompt = build_digest_prompt(chat, "古董群", "今天", "#1 甲: 我有块 486")
     assert prompt.index("#1 甲: 我有块 486") < prompt.index("复古硬件")
     assert "手机开箱" in prompt
-    assert "want_item" in prompt
+    assert '"topics"' in prompt
+    assert '"msg_nos"' in prompt
     assert "quotes" in prompt
 
 
-def test_sections_follow_want_order_and_skip_empty():
-    chat = ChatInterest("1", "p", ("甲主题", "乙主题"), (), (), "", "")
-    items = [
-        {"want_item": "乙主题", "topic": "只属于乙", "detail": "", "kind": "讨论"},
-        {"want_item": "甲主题", "topic": "属于甲", "detail": "", "kind": "讨论"},
-        {"want_item": "甲主题", "topic": "也属于甲", "detail": "", "kind": "讨论"},
+def test_prompt_asks_for_complete_narrative():
+    """话题要讲完整：prompt 必须点明按事件分话题、大话题写长。"""
+    chat = ChatInterest("1", "p", ("复古硬件",), (), "", "")
+    prompt = build_digest_prompt(chat, "古董群", "今天", "#1 甲: hi")
+    assert "一个话题 = 群友围绕同一件事来回聊的一段" in prompt
+    assert "150-300 字" in prompt
+
+
+def test_vision_prompt_uses_tags():
+    chat = ChatInterest("1", "p", ("复古硬件",), ("手机开箱",), "", "")
+    prompt = build_vision_prompt(chat, "古董群", "上文", "看图", "下文")
+    assert "复古硬件" in prompt and "手机开箱" in prompt
+    assert "这个群关心的正向标签" in prompt
+
+
+def test_topics_keep_only_configured_tags():
+    chat = ChatInterest("1", "p", ("电脑", "科研"), (), "", "")
+    topics = [
+        {"title": "本地跑大模型", "tags": ["电脑"], "msg_nos": [1, 2], "summary": "讲了很久。"},
+        {"title": "乱入的八卦", "tags": ["八卦"], "msg_nos": [3], "summary": "不在标签里。"},
+        {"title": "没打标签", "tags": [], "msg_nos": [4], "summary": "没有标签就不算。"},
     ]
-    sections, truncated = group_sections(chat, items)
-    assert [title for title, _ in sections] == ["甲主题", "乙主题"]
-    assert [len(bucket) for _, bucket in sections] == [2, 1]
-    assert truncated == 0
+    out = normalize_topics(chat, topics)
+    assert [t["title"] for t in out] == ["本地跑大模型"]
+    assert out[0]["tags"] == ["电脑"]
 
 
-def test_section_cap_counts_truncation():
-    chat = ChatInterest("1", "p", ("甲主题",), (), (), "", "")
-    items = [{"want_item": "甲主题", "topic": f"t{i}", "detail": "", "kind": "讨论"} for i in range(14)]
-    sections, truncated = group_sections(chat, items)
-    assert len(sections) == 1
-    assert len(sections[0][1]) == 12
-    assert truncated == 2
+def test_topics_sorted_by_message_count_and_deduped():
+    chat = ChatInterest("1", "p", ("电脑",), (), "", "")
+    topics = [
+        {"title": "小事", "tags": ["电脑"], "msg_nos": [1], "summary": "短。"},
+        {"title": "大事", "tags": ["电脑"], "msg_nos": [10, 11, 12], "summary": "长。"},
+        {"title": "1. 大事", "tags": ["电脑"], "msg_nos": [13], "summary": "长的更长的版本。"},
+    ]
+    out = normalize_topics(chat, topics)
+    assert [t["title"] for t in out] == ["大事", "小事"]
+    assert out[0]["msg_nos"] == [10, 11, 12, 13]
 
 
-def test_unmatched_items_go_to_other_section():
-    chat = ChatInterest("1", "p", ("甲主题",), (), (), "", "")
-    items = [{"want_item": "不相干", "topic": "x", "detail": "", "kind": "讨论"}]
-    sections, _ = group_sections(chat, items)
-    assert [title for title, _ in sections] == ["其他"]
-    assert len(sections[0][1]) == 1
+def test_topics_drop_entries_without_numbers_or_summary():
+    chat = ChatInterest("1", "p", ("电脑",), (), "", "")
+    topics = [
+        {"title": "没编号", "tags": ["电脑"], "msg_nos": [], "summary": "x"},
+        {"title": "没总结", "tags": ["电脑"], "msg_nos": [1], "summary": ""},
+    ]
+    assert normalize_topics(chat, topics) == []
 
 
-def test_empty_want_puts_everything_in_other():
-    chat = ChatInterest("1", "p", (), (), (), "", "")
-    items = [{"want_item": "随便", "topic": "y", "detail": "", "kind": "讨论"}]
-    sections, truncated = group_sections(chat, items)
-    assert [title for title, _ in sections] == ["其他"]
-    assert len(sections[0][1]) == 1
-    assert truncated == 0
+def test_merge_topics_joins_same_story_across_chunks():
+    chat = ChatInterest("1", "p", ("电脑",), (), "", "")
+    chunk1 = [{"title": "装黑苹果翻车", "tags": ["电脑"], "msg_nos": [1, 2, 3], "summary": "前半段。"}]
+    chunk2 = [{"title": "装黑苹果翻车", "tags": ["电脑"], "msg_nos": [4, 5], "summary": "前半段，补上后半段。"}]
+    merged = merge_topics(chat, [chunk1, chunk2])
+    assert len(merged) == 1
+    assert merged[0]["msg_nos"] == [1, 2, 3, 4, 5]
+    assert merged[0]["summary"] == "前半段，补上后半段。"
+
+
+def test_topic_time_range():
+    import time
+
+    base = time.mktime(time.strptime("2026-11-07 16:23", "%Y-%m-%d %H:%M"))
+    assert topic_time_range([base, base + 11 * 60]) == "16:23-16:34"
+    assert topic_time_range([base, base + 5]) == "16:23"
+    assert topic_time_range([]) == ""
+
+
+def test_topic_members_caps_and_dedupes():
+    assert topic_members(["阿越", "阿越", "", "摩顺卡"]) == "阿越、摩顺卡"
+    assert topic_members(["a", "b", "c", "d", "e"]) == "a、b、c、d 等 5 人"
+    assert topic_members([]) == ""

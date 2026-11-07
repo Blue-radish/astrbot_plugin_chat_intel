@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 from conftest import PLUGIN_DIR, make_plugin
 from intent import detect_intent
-from interest import ChatInterest, group_sections
+from interest import ChatInterest, normalize_topics
 
 
 # ---------------------------------------------------------------- 意图隔离
@@ -197,17 +197,15 @@ def test_push_refuses_group_target():
 # ---------------------------------------------------------------- 分节容错
 
 
-def test_sections_tolerate_numbered_or_punctuated_want_item():
-    chat = ChatInterest("1", "p", ("复古硬件", "元件行情"), (), (), "", "")
-    items = [
-        {"want_item": "1. 复古硬件", "topic": "a"},
-        {"want_item": "元件行情。", "topic": "b"},
-        {"want_item": "复古硬件（老机器）", "topic": "c"},
+def test_topics_tolerate_numbered_or_punctuated_tags():
+    chat = ChatInterest("1", "p", ("复古硬件", "元件行情"), (), "", "")
+    topics = [
+        {"title": "电容代换", "tags": ["1. 复古硬件"], "msg_nos": [1], "summary": "a"},
+        {"title": "行情", "tags": ["元件行情。"], "msg_nos": [2], "summary": "b"},
+        {"title": "跑偏", "tags": ["复古硬件（老机器）"], "msg_nos": [3], "summary": "c"},
     ]
-    sections, _truncated = group_sections(chat, items)
-    titles = [title for title, _bucket in sections]
-    assert titles == ["复古硬件", "元件行情"], titles
-    assert [len(bucket) for _t, bucket in sections] == [2, 1]
+    out = normalize_topics(chat, topics)
+    assert [t["tags"] for t in out] == [["复古硬件"], ["元件行情"]], out
 
 
 # ---------------------------------------------------------------- 版本一致
