@@ -1,17 +1,33 @@
-# 技术情报日报（astrbot_plugin_tech_digest）
+<p align="center">
+  <img src="docs/logo.png" width="132" alt="技术情报日报">
+</p>
 
-把群聊压成一份**只留技术向内容**的情报简报，在本地排版成一张长图，私聊发给你。
+<h1 align="center">技术情报日报（astrbot_plugin_tech_digest）</h1>
+
+<p align="center">把群聊压成一份<strong>只留技术向内容</strong>的情报简报，本地排版成一张长图，私聊发给你。</p>
 
 面向的读者是计算机专业的学生 / 从业者：只关心 **计算机与编程、AI、软件与工具、有意思的网站与资源、工作与就业**，
 吃饭、游戏、情感、追星、地域争吵、纯玩梗复读一律不进报告。
 
-![样张](docs/screenshot.png)
+## 样张
+
+聊得比较开的一天（五个板块全满）：
+
+![样张：完整](docs/sample-full.png)
+
+只有零星技术讨论的一天（板块按内容有无自动省略）：
+
+<img src="docs/sample-light.png" width="620" alt="样张：内容较少">
+
+整群都在灌水的一天（没有技术内容时不硬凑，直接给空状态）：
+
+<img src="docs/sample-quiet.png" width="620" alt="样张：没有技术内容">
 
 ## 它做什么
 
 1. **拉消息**：用指定 AstrBot 平台的 OneBot 适配器读取群历史；机器人常驻时同时把每条群消息落盘累积（见「为什么要本地累积」）
 2. **抽取**：一次 LLM 调用，输出结构化 JSON——技术话题 / 工具与资源 / 就业与工作 / AI 动向 / 今日圣经
-3. **排版**：本地 [Typst](https://typst.app) 编译成一张长图，不依赖任何远程渲染服务（不烧 GPU、不需要浏览器、断网也能出图）
+3. **排版**：本地 [Typst](https://typst.app) 编译成一张长图，不依赖任何远程渲染服务（不需要浏览器、不需要 GPU、断网也能出图）
 4. **投递**：图片写入插件数据目录，**永不发回群里**；到点自动私聊推送，或用命令随时生成
 5. **静默通道**（可选）：让承载它的机器人账号在任何群、任何私聊里都不开口——用「只读机器人号挂着群」时不会暴露
 
@@ -81,11 +97,14 @@ Typst 是本地排版引擎，`pip install` 即可，无需额外运行时（不
 |---|---|
 | `/techdigest`（别名 `/技术日报`） | 立刻生成一份，发到当前会话 |
 | `/techdigest last` | 重发最近生成的一份 |
+| `/techdigest status` | 看当前配置、本地库条数、静默拦截计数 |
 
 ## 为什么要「本地累积」
 
 多数 OneBot 实现（NapCat / SnowLuma 等）的 `get_group_msg_history` 一次只返回最近约 200 条，且
-`message_seq` 参数不一定支持翻页——想要覆盖一整天，靠历史接口是不够的。
+`message_seq` 参数不一定支持翻页。实测 SnowLuma：`count` 上限 200，
+`message_seq` / `message_id` / `start_message_id` / `anchor` / `before` 五种传法都拿回同一页——
+想覆盖一整天，靠历史接口是不够的。
 
 所以本插件在静默通道里顺手把目标群的每条消息写到
 `data/plugin_data/astrbot_plugin_tech_digest/messages/YYYY-MM-DD.jsonl`，
@@ -108,17 +127,21 @@ Typst 是本地排版引擎，`pip install` 即可，无需额外运行时（不
 ## 开发
 
 ```bash
-# 用示例数据渲染一张样张（不连 AstrBot，不需要模型）
-python scripts/preview.py --out docs/screenshot.png --fonts ./fonts
+# 渲染 logo 和三张样张（离线，不连 AstrBot，不调模型）
+python scripts/render_assets.py --fonts ./fonts
+
+# 只渲染某一张：logo / full / light / quiet
+python scripts/render_assets.py --fonts ./fonts --scene light
 ```
 
 代码结构：
 
 ```
-main.py              # 插件主逻辑：拉消息 / 抽取 / 排版 / 投递 / 静默通道
-templates/report.typ # Typst 排版模板，数据由同目录 data.json 提供
-scripts/preview.py   # 用示例数据出样张
-_conf_schema.json    # WebUI 配置项定义
+main.py                  # 插件主逻辑：拉消息 / 抽取 / 排版 / 投递 / 静默通道
+templates/report.typ     # Typst 排版模板，数据由同目录 data.json 提供
+assets/logo.typ          # logo 源文件（纯几何，不依赖字体渲染）
+scripts/render_assets.py # 用示例数据渲染 logo 与样张
+_conf_schema.json        # WebUI 配置项定义
 ```
 
 ## License
