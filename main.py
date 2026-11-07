@@ -32,8 +32,10 @@ PLUGIN_NAME = "astrbot_plugin_chat_intel"
 
 
 try:  # 插件以包形式被 AstrBot 加载时走相对导入
+    from .intent import detect_intent
     from .interest import ChatInterest, build_digest_prompt, group_sections, parse_chats
 except ImportError:  # pragma: no cover - 单测按文件路径加载模块
+    from intent import detect_intent
     from interest import ChatInterest, build_digest_prompt, group_sections, parse_chats
 
 try:  # 简繁归一化：群名可能是繁体，用户打的是简体
@@ -376,48 +378,84 @@ class TechDigestPlugin(Star):
         event.stop_event()
 
     # ------------------------------------------------------------------ 大白话直通
-    _STRONG_INTENT = re.compile(
-        r"(群聊总结|群聊日报|技术日报|技术总结|日报|聊了啥|聊了什么|聊了些啥|群里聊|群聊内容|群聊记录)"
-    )
-    _SUBJECT = re.compile(r"(群|群聊|聊天记录)")
-    _ASK = re.compile(r"(总结|统计|整理|汇总|有哪些|有什么|说了什么|讨论了什么|聊)")
-    _TIME = re.compile(
-        r"(今天|今日|昨天|昨日|前天|大前天|最近|本周|这周|上周|\d+\s*天前|\d{1,2}\s*月|\d{4}-\d{1,2})"
-    )
-
-    def _digest_intent(self, text: str) -> bool:
-        """判断这句话是不是在要群聊总结。宁可漏，不要误触发。"""
-        text = text or ""
-        if self._STRONG_INTENT.search(text):
-            return True
-        if not self._SUBJECT.search(text):
+    def _should_act(self, text: str, intent) -> bool:
+        """意图够不够格接手这件事。弱指向（只说"群里"）还得带时间词或群名。"""
+        if intent is None:
             return False
-        return bool(self._ASK.search(text) or self._TIME.search(text))
+        if intent.strong:
+            return True
+        rng, _range_txt = self._match_range(text)
+        gid, _group_txt = self._match_group(text)
+        return bool(rng or gid)
+
+    async def _send_text(self, umo: str, text: str) -> None:
+        try:
+            await self.context.send_message(umo, MessageChain().message(text))
+        except Exception as e:
+            logger.warning(f"[{PLUGIN_NAME}] 文本发送失败: {e}")
+
+    async def _send_image(self, umo: str, path: Path) -> None:
+        try:
+            await self.context.send_message(
+                umo, MessageChain([AstrImage.fromFileSystem(str(path))])
+            )
+        except Exception as e:
+            logger.warning(f"[{PLUGIN_NAME}] 图片发送失败: {e}")
+
+    async def _handle_intent(self, event: AstrMessageEvent, intent) -> None:
+        """按意图分流：状态 / 重发 / 重跑 / 总结。"""
+        text = (event.message_str or "").strip()
+        umo = event.unified_msg_origin
+
+        if intent.kind == "status":
+            await self._send_text(umo, "\n".join(await self._status_lines()))
+            return
+        if intent.kind == "resend":
+            latest = self._latest_report()
+            if latest is None:
+                await self._send_text(umo, "还没有生成过报告。")
+            else:
+                await self._send_image(umo, latest)
+            return
+
+        for gid in self.group_ids:
+            await self._group_name(gid)  # 预热群名，否则按名字匹配不到群
+        rng, gid, rest = self._resolve_request(text)
+        if rest and self.smart_parse and len(rest) >= 2:
+            hint = await self._llm_parse_args(rest)
+            if hint:
+                date_hint, group_hint = hint
+                if date_hint:
+                    better, _ = self._match_range(date_hint)
+                    if better:
+                        rng = better
+                if group_hint and not gid:
+                    gid, _ = self._match_group(group_hint)
+        since, until, label, incremental = rng
+        if intent.kind == "rerun":
+            incremental = False  # 重跑：忽略增量位，按范围重来
+        logger.info(
+            f"[{PLUGIN_NAME}] 直通 {intent.kind}：范围={label} 增量={incremental} "
+            f"群={gid or '全部'} 命中「{intent.anchor}+{intent.action}」原文「{text}」"
+        )
+        await self._generate_and_send(umo, since, until, label, incremental, gid)
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=900)
     async def intercept_digest_intent(self, event: AstrMessageEvent):
-        """私聊里用大白话要总结时直接出报告，不赌模型会不会调工具。"""
+        """私聊里用大白话要报告时直接出图，不赌模型会不会调工具。"""
         if not self._tool_allowed(event):
             return
         text = (event.message_str or "").strip()
         if not text or text.startswith(("/", "／", "#")):
             return
-        if not self._digest_intent(text):
+        intent = detect_intent(text)
+        if not self._should_act(text, intent):
             return
-        if self._running or not self.group_ids:
-            return
-        if any(k in text for k in ("重发", "再发", "状态", "配置")):
-            return
-        for gid in self.group_ids:
-            await self._group_name(gid)
-        rng, gid, _rest = self._resolve_request(text)
         event.stop_event()  # 模型这段就别开口了
-        logger.info(
-            f"[{PLUGIN_NAME}] 大白话直通：范围={rng[2]} 群={gid or '全部'} 原文「{text}」"
-        )
-        asyncio.create_task(
-            self._generate_and_send(event.unified_msg_origin, *rng, gid)
-        )
+        if self._running:
+            await self._send_text(event.unified_msg_origin, "上一份还在生成，跑完会直接把图发给你。")
+            return
+        asyncio.create_task(self._handle_intent(event, intent))
 
     @filter.on_llm_request()
     async def silence_llm(self, event: AstrMessageEvent, req: ProviderRequest) -> bool:
@@ -1669,7 +1707,7 @@ class TechDigestPlugin(Star):
 
     @filter.llm_tool(name="group_digest")
     async def tool_group_digest(
-        self, event: AstrMessageEvent, when: str = "", group: str = ""
+        self, event: AstrMessageEvent, when: str = "", group: str = "", again: bool = False
     ) -> str:
         """查看被监控群聊的内容，并生成一份报告图直接发给用户。
 
@@ -1680,6 +1718,7 @@ class TechDigestPlugin(Star):
         Args:
             when(string): 时间范围，直接用用户原话即可，例如 今天 / 昨天 / 前天 / 最近3天 / 上周 / 2026-11-05；用户没提时间就留空，表示只看没看过的消息
             group(string): 群名的一部分或群号，例如 考古 / 极东；用户没指定群就留空，表示所有群
+            again(boolean): 用户要求"重跑一遍""再看一次"时传 true，忽略增量位重新总结该时段
         """
         if not self._tool_allowed(event):
             return "这个工具只能在私聊里由主人使用；群里不会发任何报告。"
@@ -1702,6 +1741,8 @@ class TechDigestPlugin(Star):
                 if group_hint and not gid:
                     gid, _ = self._match_group(group_hint)
         since, until, label, incremental = rng
+        if again:
+            incremental = False
 
         # 生成可能要好几分钟，先立刻回话，图由后台任务直接发到聊天里
         event.set_extra("chat_intel_tool_sent", True)
@@ -1719,75 +1760,6 @@ class TechDigestPlugin(Star):
         return (
             f"已在后台开始生成（范围：{label}，目标：{target}），"
             "报告图会直接发到聊天里。不要再用文字复述或总结，保持沉默即可。"
-        )
-
-    @filter.command("群聊总结", alias={"技术日报"})
-    async def cmd_digest(self, event: AstrMessageEvent):
-        """生成技术情报日报（成功时不发任何提示，只发那张图）。
-
-        /群聊总结            只看没看过的（自上次报告以来的新消息）
-        /群聊总结 今天        今天 00:00 到现在
-        /群聊总结 昨天        昨天整天
-        /群聊总结 2026-11-05  指定日期
-        /群聊总结 3天前       指定日期（相对）
-        /群聊总结 今天 群名    只跑名字匹配的那个群
-        /群聊总结 重发        重发最近一份
-        /群聊总结 状态        配置与本地库情况
-        """
-        arg = re.sub(
-            r"^\s*/?\s*(?:群聊总结|技术日报)\s*",
-            "",
-            event.message_str or "",
-            flags=re.IGNORECASE,
-        ).strip()
-
-        for gid in self.group_ids:
-            await self._group_name(gid)  # 先把群名填进缓存，下面才能按群名匹配
-
-        norm = self._clean_text(arg)
-
-        if norm in ("状态", "配置", "情况", "设置", "详情"):
-            yield event.plain_result("\n".join(await self._status_lines()))
-            return
-        if norm in ("重发", "再发", "上一份", "最新一份", "最后一份", "刚才那份"):
-            latest = self._latest_report()
-            if latest is None:
-                yield event.plain_result("还没有生成过日报。")
-                return
-            yield event.image_result(str(latest))
-            return
-
-        rng, only_gid, rest = self._resolve_request(arg)
-        # 规则没吃掉的碎片，问一次模型（可在配置里关掉）
-        if rest and self.smart_parse and len(rest) >= 2:
-            hint = await self._llm_parse_args(rest)
-            if hint:
-                date_hint, group_hint = hint
-                if date_hint:
-                    better, _ = self._match_range(date_hint)
-                    if better:
-                        rng = better
-                if group_hint and not only_gid:
-                    better_gid, _ = self._match_group(group_hint)
-                    if better_gid:
-                        only_gid = better_gid
-        since, until, label, incremental = rng
-
-        if self._running:
-            yield event.plain_result("上一份还在生成，跑完会直接把图发给你。")
-            return
-        if not self.group_ids:
-            yield event.plain_result("还没配置要监控的群（group_ids）。")
-            return
-        logger.info(
-            f"[{PLUGIN_NAME}] 命令解析：范围={label} 增量={incremental} "
-            f"群={only_gid or '全部'} 原始「{arg}」"
-        )
-        # 成功路径全程不吭声，只发图；失败才回文字
-        asyncio.create_task(
-            self._generate_and_send(
-                event.unified_msg_origin, since, until, label, incremental, only_gid
-            )
         )
 
     async def _status_lines(self) -> list[str]:
