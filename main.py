@@ -623,7 +623,8 @@ class TechDigestPlugin(Star):
     def _diag(self, tag: str, detail: str, exc: bool = False) -> None:
         self._diag_count += 1
         if self._diag_count <= 5:
-            logger.warning(f"[{PLUGIN_NAME}] 落盘失败（{tag}）：{detail}", exc_info=exc)
+            # 只报前几条，避免刷屏；tag 自带定位信息（图片下载失败 / 取群名失败 / 异常 …）
+            logger.warning(f"[{PLUGIN_NAME}] {tag}：{detail}", exc_info=exc)
 
     def _load_records(self, gid: str, since: float, until: float) -> list[dict]:
         out: list[dict] = []
@@ -807,7 +808,8 @@ class TechDigestPlugin(Star):
             return self.group_name_map[gid]
         bot = self._get_bot(gid)
         if bot is None or not hasattr(bot, "call_action"):
-            self._diag("取群名失败", "拿不到 bot 实例")
+            # 启动瞬间 bot 还没连上，属正常情况：不缓存、不刷警告，下次再试
+            logger.debug(f"[{PLUGIN_NAME}] 取群名失败 {gid}：暂无 bot 实例")
             return "群聊"
         # aiocqhttp 的 call_action 直接返回 data 本身，也可能被包成 {"data": ...}，两种都试
         for action, params in (
