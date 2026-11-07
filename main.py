@@ -137,7 +137,7 @@ USER_PROMPT_TEMPLATE = """下面是群「{group}」在 {window} 的聊天记录�
 {transcript}"""
 
 
-@register(PLUGIN_NAME, "Ray", "多群技术情报日报：只留技术向内容，视觉模型筛图，本地排版成图，静默私聊投递", "1.2.0")
+@register(PLUGIN_NAME, "Ray", "多群技术情报日报：只留技术向内容，视觉模型筛图，本地排版成图，静默私聊投递", "1.2.1")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -172,6 +172,10 @@ class TechDigestPlugin(Star):
             self.max_image_mb = max(1, int(self.config.get("max_image_mb") or 8))
         except (TypeError, ValueError):
             self.max_image_mb = 8
+        try:
+            self.keep_days = max(1, int(self.config.get("keep_days") or 7))
+        except (TypeError, ValueError):
+            self.keep_days = 7
 
         ignore = str(self.config.get("ignore_uids") or "")
         self.ignore_uids = {u.strip() for u in ignore.split(",") if u.strip()}
@@ -1149,7 +1153,7 @@ class TechDigestPlugin(Star):
         self, gid: str, since: float, until: float, label: str, incremental: bool
     ) -> tuple[Path | None, str]:
         if gid not in self.group_ids:
-            return None, f"群 {gid} 不在监控列表里"
+            return None, f"群 {gid} 不在监控列表里", True
         real_since = self._resolve_since(gid, since, incremental, until)
         group_name = await self._group_name(gid)
 
@@ -1172,11 +1176,11 @@ class TechDigestPlugin(Star):
                 records = merged[-self.max_messages :]
 
         if not records:
-            return None, f"{group_name}：{label}没有消息"
+            return None, f"{group_name}：{label}没有消息", False
 
         transcript, msg_count, people = self._build_transcript(records)
         if not transcript.strip():
-            return None, f"{group_name}：{label}只有表情和图片，没有可总结的文本"
+            return None, f"{group_name}：{label}只有表情和图片，没有可总结的文本", False
 
         chunks = self._split_chunks(transcript)
         parts: list[dict] = []
@@ -1188,7 +1192,7 @@ class TechDigestPlugin(Star):
             if len(chunks) > 1:
                 await asyncio.sleep(0.5)
         if not parts:
-            return None, f"{group_name}：模型没有给出可用的结构化结果"
+            return None, f"{group_name}：模型没有给出可用的结构化结果", True
 
         data = self._merge_parts(parts)
         quotes = data.get("quotes") or []
@@ -1223,7 +1227,7 @@ class TechDigestPlugin(Star):
 
         path = self._render(payload, images, gid, label)
         if path is None:
-            return None, f"{group_name}：排版成图失败，看日志"
+            return None, f"{group_name}：排版成图失败，看日志", True
 
         if incremental:
             self._group_state(gid)["last_ts"] = int(until)
@@ -1238,20 +1242,24 @@ class TechDigestPlugin(Star):
             + (f" · {len(chunks)} 段" if len(chunks) > 1 else "")
         )
         logger.info(f"[{PLUGIN_NAME}] {info} -> {path.name}")
-        return path, info
+        self._prune_old_files()
+        return path, info, False
 
     async def generate_all(
         self, since: float, until: float, label: str, incremental: bool, only_gid: str | None = None
-    ) -> list[tuple[str, Path | None, str]]:
-        results: list[tuple[str, Path | None, str]] = []
+    ) -> list[tuple[str, Path | None, str, bool]]:
+        """返回 (群号, 图路径或 None, 说明, 是否报错)。"""
+        results: list[tuple[str, Path | None, str, bool]] = []
         targets = [only_gid] if only_gid else list(self.group_ids)
         for gid in targets:
             try:
-                path, info = await self.generate_group(gid, since, until, label, incremental)
+                path, info, is_error = await self.generate_group(
+                    gid, since, until, label, incremental
+                )
             except Exception as e:
                 logger.error(f"[{PLUGIN_NAME}] 生成 {gid} 失败: {e}", exc_info=True)
-                path, info = None, f"群 {gid}：生成异常 {e}"
-            results.append((gid, path, info))
+                path, info, is_error = None, f"群 {gid} 生成异常：{e}", True
+            results.append((gid, path, info, is_error))
         return results
 
     @staticmethod
@@ -1272,7 +1280,8 @@ class TechDigestPlugin(Star):
                 out.append(row)
         return out
 
-    async def _push(self, path: Path, caption: str) -> bool:
+    async def _push(self, path: Path) -> bool:
+        """只发报告图，不带任何说明文字。"""
         if not self.push_enabled or not self.push_umo:
             return False
         try:
@@ -1280,12 +1289,24 @@ class TechDigestPlugin(Star):
                 self.push_umo, MessageChain([AstrImage.fromFileSystem(str(path))])
             )
             if ok:
-                await asyncio.sleep(1)
-                await self.context.send_message(self.push_umo, MessageChain().message(caption))
                 logger.info(f"[{PLUGIN_NAME}] 已推送 {path.name} -> {self.push_umo}")
             return bool(ok)
         except Exception as e:
             logger.error(f"[{PLUGIN_NAME}] 推送失败: {e}", exc_info=True)
+            return False
+
+    async def _push_text(self, text: str) -> bool:
+        """只有出错时才发文字。"""
+        if not self.push_enabled or not self.push_umo:
+            return False
+        try:
+            return bool(
+                await self.context.send_message(
+                    self.push_umo, MessageChain().message(text)
+                )
+            )
+        except Exception as e:
+            logger.error(f"[{PLUGIN_NAME}] 文字推送失败: {e}", exc_info=True)
             return False
 
     # ------------------------------------------------------------------ 定时
@@ -1307,11 +1328,13 @@ class TechDigestPlugin(Star):
                                 results = await self.generate_all(
                                     0.0, until, "最新消息", True
                                 )
-                                for _gid, path, info in results:
+                                for _gid, path, info, is_error in results:
                                     if path is None:
-                                        logger.warning(f"[{PLUGIN_NAME}] 定时生成失败: {info}")
+                                        logger.info(f"[{PLUGIN_NAME}] 定时跳过：{info}")
+                                        if is_error:
+                                            await self._push_text(f"日报出错：{info}")
                                         continue
-                                    await self._push(path, info)
+                                    await self._push(path)
                             finally:
                                 self._running = False
             except asyncio.CancelledError:
@@ -1321,6 +1344,7 @@ class TechDigestPlugin(Star):
             await asyncio.sleep(30)
 
     async def initialize(self) -> None:
+        self._prune_old_files()
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._scheduler())
 
@@ -1334,21 +1358,21 @@ class TechDigestPlugin(Star):
         self._task = None
 
     # ------------------------------------------------------------------ 命令
-    @filter.command("techdigest", alias={"技术日报"})
+    @filter.command("群聊总结", alias={"技术日报", "techdigest"})
     async def cmd_digest(self, event: AstrMessageEvent):
-        """生成技术情报日报。
+        """生成技术情报日报（成功时不发任何提示，只发那张图）。
 
-        /techdigest            只看没看过的（自上次报告以来的新消息）
-        /techdigest 今天        今天 00:00 到现在
-        /techdigest 昨天        昨天整天
-        /techdigest 2026-11-05  指定日期
-        /techdigest 3天前       指定日期（相对）
-        /techdigest 昨天 群名    只跑名字匹配的那个群
-        /techdigest last       重发最近一份
-        /techdigest status     配置与本地库状态
+        /群聊总结            只看没看过的（自上次报告以来的新消息）
+        /群聊总结 今天        今天 00:00 到现在
+        /群聊总结 昨天        昨天整天
+        /群聊总结 2026-11-05  指定日期
+        /群聊总结 3天前       指定日期（相对）
+        /群聊总结 今天 群名    只跑名字匹配的那个群
+        /群聊总结 重发        重发最近一份
+        /群聊总结 状态        配置与本地库情况
         """
         arg = re.sub(
-            r"^\s*/?\s*(?:techdigest|技术日报)\s*",
+            r"^\s*/?\s*(?:群聊总结|技术日报|techdigest)\s*",
             "",
             event.message_str or "",
             flags=re.IGNORECASE,
@@ -1356,10 +1380,10 @@ class TechDigestPlugin(Star):
 
         tokens = [t for t in re.split(r"\s+", arg) if t]
 
-        if tokens and tokens[0] in ("status", "状态"):
+        if tokens and tokens[0] in ("状态", "配置", "status"):
             yield event.plain_result("\n".join(await self._status_lines()))
             return
-        if tokens and tokens[0] in ("last", "最新一份", "上一份"):
+        if tokens and tokens[0] in ("重发", "最新一份", "上一份", "last"):
             latest = self._latest_report()
             if latest is None:
                 yield event.plain_result("还没有生成过日报。")
@@ -1379,17 +1403,12 @@ class TechDigestPlugin(Star):
         since, until, label, incremental = self._parse_range(range_arg)
 
         if self._running:
-            yield event.plain_result("正在生成中，跑完会直接发给你。")
+            yield event.plain_result("上一份还在生成，跑完会直接把图发给你。")
             return
-        targets = [only_gid] if only_gid else list(self.group_ids)
-        names = [f"{await self._group_name(g)}（{g}）" for g in targets]
-        if not names:
+        if not self.group_ids:
             yield event.plain_result("还没配置要监控的群（group_ids）。")
             return
-        yield event.plain_result(
-            f"开工：{'、'.join(names)} · 范围 {label}。"
-            "消息多的时候要过几遍模型，可能要几分钟。"
-        )
+        # 成功路径全程不吭声，只发图；失败才回文字
         asyncio.create_task(
             self._generate_and_send(
                 event.unified_msg_origin, since, until, label, incremental, only_gid
@@ -1442,7 +1461,8 @@ class TechDigestPlugin(Star):
         lines.append(f"最近报告：{latest.name if latest else '无'}")
         lines.append(
             f"定时 {self.daily_time or '关闭'} · 推送 {self.push_umo or '关闭'} · "
-            f"上限 {self.max_messages} 条 · 图片上限 {self.max_images} 张"
+            f"上限 {self.max_messages} 条 · 图片上限 {self.max_images} 张 · "
+            f"数据保留 {self.keep_days} 天"
         )
         return lines
 
@@ -1458,15 +1478,17 @@ class TechDigestPlugin(Star):
         self._running = True
         try:
             results = await self.generate_all(since, until, label, incremental, only_gid)
-            for _gid, path, info in results:
+            for _gid, path, info, is_error in results:
                 if path is None:
-                    await self.context.send_message(umo, MessageChain().message(f"跳过：{info}"))
+                    logger.info(f"[{PLUGIN_NAME}] 跳过：{info}")
+                    if is_error:
+                        await self.context.send_message(
+                            umo, MessageChain().message(f"出错了：{info}")
+                        )
                     continue
                 await self.context.send_message(
                     umo, MessageChain([AstrImage.fromFileSystem(str(path))])
                 )
-                await asyncio.sleep(1)
-                await self.context.send_message(umo, MessageChain().message(info))
                 await asyncio.sleep(1)
         except Exception as e:
             logger.error(f"[{PLUGIN_NAME}] 生成流程异常: {e}", exc_info=True)
@@ -1476,6 +1498,54 @@ class TechDigestPlugin(Star):
                 pass
         finally:
             self._running = False
+
+    # ------------------------------------------------------------------ 过期清理
+    def _prune_old_files(self) -> None:
+        """只保留最近 keep_days 天的消息与图片，防止磁盘无上限增长。"""
+        cutoff_day = (datetime.now() - timedelta(days=self.keep_days)).strftime("%Y-%m-%d")
+        removed_msgs = removed_imgs = 0
+        for path in self.store_dir.glob("*.jsonl"):
+            if path.stem < cutoff_day:
+                try:
+                    path.unlink()
+                    removed_msgs += 1
+                except Exception:
+                    pass
+        for day_dir in self.images_dir.iterdir():
+            if not day_dir.is_dir() or day_dir.name >= cutoff_day:
+                continue
+            try:
+                removed_imgs += sum(1 for _ in day_dir.iterdir())
+                shutil.rmtree(day_dir, ignore_errors=True)
+            except Exception:
+                pass
+        if removed_msgs or removed_imgs:
+            logger.info(
+                f"[{PLUGIN_NAME}] 清理过期数据（保留 {self.keep_days} 天）："
+                f"消息文件 {removed_msgs} 个、图片 {removed_imgs} 张"
+            )
+        # 顺手把报告也按同样天数清理，避免 reports/ 无限膨胀
+        removed_reports = 0
+        cutoff_ts = (datetime.now() - timedelta(days=self.keep_days)).timestamp()
+        for path in self.reports_dir.glob("*.png"):
+            try:
+                if path.stat().st_mtime < cutoff_ts:
+                    path.unlink()
+                    removed_reports += 1
+            except Exception:
+                pass
+        if removed_reports:
+            logger.info(f"[{PLUGIN_NAME}] 清理旧报告 {removed_reports} 份")
+        # 图片没了，判定缓存也别留着
+        alive = {p.name for p in self.images_dir.rglob("*.jpg")}
+        cache = self.state.get("images")
+        if isinstance(cache, dict) and cache:
+            stale = [k for k in cache if k not in alive]
+            for key in stale:
+                cache.pop(key, None)
+            if stale:
+                self._save_state()
+                logger.info(f"[{PLUGIN_NAME}] 清理失效的判图缓存 {len(stale)} 条")
 
     def _latest_report(self) -> Path | None:
         files = sorted(

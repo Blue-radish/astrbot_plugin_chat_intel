@@ -47,6 +47,12 @@
     "description": "单张图片大小上限（MB），超过就丢弃",
     "default": 8
   },
+  "keep_days": {
+    "type": "int",
+    "description": "本地消息与图片保留多少天",
+    "default": 7,
+    "hint": "超期的 messages/*.jsonl、images/日期目录、reports 里的旧图会被自动清掉"
+  },
   "daily_time": {
     "type": "string",
     "description": "每天自动生成的时间（HH:MM），留空则不定时；只总结上次之后的新消息",
