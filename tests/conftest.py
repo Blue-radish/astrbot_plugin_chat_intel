@@ -50,9 +50,10 @@ def make_plugin(**attrs):
     p.owner_uids = set(attrs.pop("owner_uids", []))
     p.group_name_map = attrs.pop("group_name_map", {})
     p.silence_platforms = attrs.pop("silence_platforms", [])
-    p.platform_id = attrs.pop("platform_id", "")
     p.push_enabled = attrs.pop("push_enabled", False)
     p.push_umo = attrs.pop("push_umo", "")
+    p.legacy_platform_id = attrs.pop("platform_id", "")
+    p._push_cfg_error = ""
     p.chats = attrs.pop("chats", [])
     p.group_ids = attrs.pop("group_ids", [])
     p.smart_parse = attrs.pop("smart_parse", False)

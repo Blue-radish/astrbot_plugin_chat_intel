@@ -2,7 +2,7 @@
   "chats": {
     "type": "template_list",
     "description": "要总结的群",
-    "hint": "点下面的「添加」加一行，每行一个群；群号必填（机器人要已经在群里），「关心的标签」也必填，没填的群会被跳过并在私聊里提醒你",
+    "hint": "点下面的「添加」加一行，每行一个群；群号、读取账号、关心的标签都要填。缺「关心的标签」或「读取账号」的群会被跳过，并在私聊里提醒你一次",
     "templates": {
       "chat": {
         "name": "群",
@@ -12,6 +12,12 @@
             "description": "群号（必填，机器人要在群里）",
             "default": "",
             "hint": "纯数字，例如 220002"
+          },
+          "platform": {
+            "type": "string",
+            "description": "读取账号（必填）：用哪个 bot 读这个群",
+            "default": "",
+            "hint": "填 AstrBot 里那个平台实例的 id，比如 bot_b。没填的群照样采集消息，但不会生成报告"
           },
           "name": {
             "type": "string",
@@ -30,11 +36,6 @@
             "default": "",
             "hint": "告诉模型哪些话题别收，例如 二手交易、砍价。由模型按语义判断，不是严格的过滤器"
           },
-          "platform": {
-            "type": "string",
-            "description": "读历史用的账号（留空用下面的默认账号）",
-            "default": ""
-          },
           "title": {
             "type": "string",
             "description": "这份报告的标题（留空用全局标题）",
@@ -44,11 +45,6 @@
         "display_item": "gid"
       }
     }
-  },
-  "platform_id": {
-    "type": "string",
-    "description": "默认读取账号：某个群没填 platform 时用它读历史（不会静默这个账号）",
-    "default": ""
   },
   "days": {
     "type": "float",
@@ -107,14 +103,27 @@
   },
   "push_enabled": {
     "type": "bool",
-    "description": "生成后是否自动推送到上面的会话",
+    "description": "生成后是否自动私聊推送给你",
     "default": false
+  },
+  "push_platform": {
+    "type": "string",
+    "description": "用哪个机器人私聊发给你",
+    "default": "",
+    "hint": "平台实例 id，比如 bot_a。就是你想收到报告的那个机器人"
+  },
+  "push_uid": {
+    "type": "string",
+    "description": "发给谁（QQ 号）",
+    "default": "",
+    "hint": "收报告的 QQ 号，纯数字，比如 110001"
   },
   "push_umo": {
     "type": "string",
-    "description": "自动推送到哪个私聊会话（形如 平台id:FriendMessage:QQ号）",
+    "description": "完整会话 id（旧写法，已隐藏）",
     "default": "",
-    "hint": "只接受私聊会话；填成群聊或格式不对会被拒绝并在日志里报错。它不决定谁能主动查报告，那是 owner_uids 的事"
+    "hint": "一般不用管：上面两个框填好会自动拼成这个。留着是为了兼容旧配置",
+    "invisible": true
   },
   "report_title": {
     "type": "string",
@@ -135,6 +144,6 @@
     "type": "string",
     "description": "要静音的账号（一般不用填）：这些账号在任何群、任何私聊都不开口",
     "default": "",
-    "hint": "留空 = 不静音任何账号（读历史账号不会自动静音）。填了会让这个账号对**所有**插件都闭嘴，包括别的插件的回复，确认清楚再填"
+    "hint": "留空 = 不静音任何账号（每群的「读取账号」不会自动静音）。填了会让这个账号对**所有**插件都闭嘴，包括别的插件的回复，确认清楚再填"
   }
 }

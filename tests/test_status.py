@@ -8,20 +8,22 @@ RAW = [
 
 
 def test_apply_chats_derives_group_ids_and_lookup():
-    p, _ = make_plugin(platform_id="bot_b")
+    p, _ = make_plugin()
     p._apply_chats(RAW)
     assert p.group_ids == ["220001", "220002"]
     assert p._chat("220002").platform == "bot_a"
     assert p._chat("999") is None
 
 
-def test_apply_chats_falls_back_to_platform_id():
-    p, _ = make_plugin(platform_id="bot_b")
+def test_apply_chats_has_no_global_fallback_account():
+    """读取账号是每群必填：没有「全局默认账号」可以顶替。"""
+    p, _ = make_plugin()
+    p.legacy_platform_id = "bot_b"
     p._apply_chats([{"gid": "1", "tags_pos": "x"}])
-    assert p._chat("1").platform == "bot_b"
+    assert p._chat("1").platform == ""
 
 
-def test_status_line_shows_collect_platform_and_warns_missing_want():
+def test_status_line_shows_read_account_and_warns_missing_want():
     p, _ = make_plugin()
     chat = ChatInterest("1", "bot_b", ("复古硬件",), (), "", "")
     line = p._chat_status_line(chat, "古董群", 12, 3, "11-07 23:00")
@@ -33,8 +35,13 @@ def test_status_line_shows_collect_platform_and_warns_missing_want():
     assert "未配置标签" in p._chat_status_line(empty, "空群", 0, 0, "")
 
 
-def test_apply_chats_without_platform_id_attribute():
-    """__init__ 里的调用顺序不该被 _apply_chats 依赖：实例上还没有 platform_id 时也要能解析。"""
+def test_status_line_flags_missing_read_account():
+    p, _ = make_plugin()
+    chat = ChatInterest("3", "", ("复古硬件",), (), "", "")
+    assert "⚠ 没填读取账号" in p._chat_status_line(chat, "某群", 0, 0, "")
+
+
+def test_apply_chats_without_platform_attribute_is_safe():
     p, _ = make_plugin()
     p._apply_chats([{"gid": "1", "tags_pos": "x"}])
     assert p._chat("1").platform == ""

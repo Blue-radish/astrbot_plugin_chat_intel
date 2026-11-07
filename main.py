@@ -131,7 +131,7 @@ TECH_HINTS = (
 
 SYSTEM_PROMPT = """你在给群友写一份私人情报简报。文字克制、具体、可执行。"""
 
-@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递", "2.2.1")
+@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递", "2.2.2")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -145,7 +145,8 @@ class TechDigestPlugin(Star):
         self.max_messages = self._num_cfg("max_messages", 10000, lo=50)
         self.daily_time = str(self.config.get("daily_time") or "").strip()
         self.push_enabled = self._as_bool(self.config.get("push_enabled"), False)
-        self.push_umo = str(self.config.get("push_umo") or "").strip()
+        # 推送目标用「发信账号 + 收件人 QQ」两个框拼，旧配置里整串的 push_umo 继续认
+        self.push_umo, self._push_cfg_error = self.build_push_target(self.config)
         self.report_title = str(self.config.get("report_title") or "群聊情报").strip()
         self.ppi = self._num_cfg("render_ppi", 180, lo=72)
 
@@ -162,9 +163,9 @@ class TechDigestPlugin(Star):
         ignore = str(self.config.get("ignore_uids") or "")
         self.ignore_uids = {u.strip() for u in ignore.split(",") if u.strip()}
 
-        # 读历史用的账号 ≠ 要静音的账号：静默必须显式填，绝不隐式继承 platform_id
-        self.platform_id, self.silence_platforms = self._resolve_silence(self.config)
-        # 必须在 platform_id 之后解析 chats：每群的 platform 缺省时要回退到它
+        # 静默必须显式填；读取账号现在是每群必填，不再有全局默认账号
+        self.silence_platforms = self._parse_silence(self.config)
+        self.legacy_platform_id = str(self.config.get("platform_id") or "").strip()
         self._apply_chats(self.config.get("chats"))
         self._silenced = 0
         self._llm_blocked = 0
@@ -197,7 +198,7 @@ class TechDigestPlugin(Star):
             if f.suffix.lower() in (".ttf", ".otf", ".ttc")
         ]
         logger.info(
-            f"[{PLUGIN_NAME}] 群={self.group_ids or '(未配置)'} 平台={self.platform_id or '(未配置)'} "
+            f"[{PLUGIN_NAME}] 群={self.group_ids or '(未配置)'} "
             f"定时={self.daily_time or '关闭'} 推送={self.push_umo or '关闭'} "
             f"图片={'开' if self.include_images else '关'} 上限={self.max_messages} 条 "
             f"静默平台={self.silence_platforms or '无'} 字体={len(fonts)} 个"
@@ -206,11 +207,18 @@ class TechDigestPlugin(Star):
             logger.warning(
                 f"[{PLUGIN_NAME}] {self.font_dir} 里没有字体文件，中文可能显示为方框。"
             )
-        if self.platform_id and not self.silence_platforms:
-            logger.info(
-                f"[{PLUGIN_NAME}] {self.platform_id} 只作为「读历史」的账号，不会静音它；"
-                "要静音请在 silence_platforms 里显式填"
+        if self.legacy_platform_id:
+            logger.warning(
+                f"[{PLUGIN_NAME}] 配置里的 platform_id（{self.legacy_platform_id}）已经不用了："
+                "读取账号改成每个群各自填「读取账号」，不再有全局默认账号"
             )
+        missing_platform = [c.gid for c in self.chats if not c.platform]
+        if missing_platform:
+            logger.warning(
+                f"[{PLUGIN_NAME}] 这些群没填「读取账号」（必填），生成时会跳过：{missing_platform}"
+            )
+        if self._push_cfg_error:
+            logger.error(f"[{PLUGIN_NAME}] 推送设置有问题：{self._push_cfg_error}")
         if not self.group_ids:
             logger.warning(
                 f"[{PLUGIN_NAME}] 还没配置要总结的群（chats），现在是待配置状态；"
@@ -248,18 +256,36 @@ class TechDigestPlugin(Star):
         return float(value) if as_float else int(value)
 
     @staticmethod
-    def _resolve_silence(config: dict) -> tuple[str, list[str]]:
-        """解析「读历史账号」和「静默名单」：两者互不联动，静默必须显式配置。"""
+    def _parse_silence(config: dict) -> list[str]:
+        """解析静默名单。静默与「读历史账号」互不联动，必须显式配置。"""
         config = config or {}
-        platform = str(config.get("platform_id") or "").strip()
         raw = config.get("silence_platforms") or ""
         if isinstance(raw, str):
-            items = [x.strip() for x in raw.split(",") if x.strip()]
-        elif isinstance(raw, (list, tuple)):
-            items = [str(x).strip() for x in raw if str(x).strip()]
-        else:
-            items = []
-        return platform, items
+            return [x.strip() for x in raw.split(",") if x.strip()]
+        if isinstance(raw, (list, tuple)):
+            return [str(x).strip() for x in raw if str(x).strip()]
+        return []
+
+    @staticmethod
+    def build_push_target(config: dict) -> tuple[str, str]:
+        """把「发信账号 + 收件人 QQ 号」拼成会话 id，返回 (会话 id, 错误说明)。
+
+        两个输入框是给人和给校验看的；拼出来的会话 id 才交给推送层。
+        旧配置里整串的 push_umo 继续认（不填两个框时就用它）。
+        """
+        config = config or {}
+        platform = str(config.get("push_platform") or "").strip()
+        uid = str(config.get("push_uid") or "").strip()
+        legacy = str(config.get("push_umo") or "").strip()
+        if not platform and not uid:
+            return legacy, ""
+        if not platform:
+            return "", "填了收件人 QQ 号，但没填「用哪个机器人发」"
+        if not uid:
+            return "", "填了发信账号，但没填收件人 QQ 号"
+        if not uid.isdigit():
+            return "", f"收件人 QQ 号「{uid}」不是纯数字"
+        return f"{platform}:FriendMessage:{uid}", ""
 
     def _parse_group_ids(self) -> list[str]:
         """兼容老配置里的 group_ids（字符串或列表），新配置走 chats。"""
@@ -283,13 +309,15 @@ class TechDigestPlugin(Star):
         return bool(value)
 
     def _apply_chats(self, raw) -> None:
-        """把配置里的 chats 解析成 ChatInterest 列表，并派生 group_ids。"""
-        fallback = getattr(self, "platform_id", "") or ""
-        chats, skipped = parse_chats(raw, fallback)
+        """把配置里的 chats 解析成 ChatInterest 列表，并派生 group_ids。
+
+        读取账号是每群必填（不再有全局默认账号）：没填的群照样采集，生成时跳过并提醒。
+        """
+        chats, skipped = parse_chats(raw, "")
         if not chats:
             legacy = self._parse_group_ids()
             if legacy:
-                chats = [ChatInterest(gid=gid, platform=fallback) for gid in legacy]
+                chats = [ChatInterest(gid=gid, platform="") for gid in legacy]
                 logger.warning(
                     f"[{PLUGIN_NAME}] 检测到旧配置 group_ids={legacy}，已临时当作 chats 使用；"
                     f"请在设置界面为每个群补上「关心的标签」"
@@ -318,7 +346,7 @@ class TechDigestPlugin(Star):
     ) -> str:
         """状态里每个群一行：谁在采集、今天多少条、上次覆盖到哪。"""
         parts = [f"{name}（{chat.gid}）"]
-        parts.append(f"读历史用 {chat.platform or '未配置'}")
+        parts.append(f"读历史用 {chat.platform}" if chat.platform else "⚠ 没填读取账号")
         parts.append(f"今日 {count} 条 / 带图 {imgs} 条")
         parts.append(f"上次报告覆盖到 {last or '还没生成过'}")
         if chat.tags_pos:
@@ -358,10 +386,9 @@ class TechDigestPlugin(Star):
 
     # ------------------------------------------------------------------ 基础
     def _get_bot(self, gid: str | None = None):
-        platform_id = self.platform_id
+        """按这个群自己的「读取账号」拿 bot 实例；没填就是没有（没有全局默认账号）。"""
         chat = self._chat(gid)
-        if chat is not None and chat.platform:
-            platform_id = chat.platform
+        platform_id = chat.platform if chat is not None else ""
         if not platform_id:
             return None
         try:
@@ -1357,6 +1384,25 @@ class TechDigestPlugin(Star):
         return out
 
     # ------------------------------------------------------------------ 图片挑选
+    async def _alert_missing_platform(self, group_name: str, gid: str) -> None:
+        """某个群没填读取账号时私聊提醒一次（同一个群不反复刷）。"""
+        key = f"warned_platform_{gid}"
+        if self.state.get(key):
+            return
+        text = (
+            f"⚠ {group_name} 没填「读取账号」，这个群不会生成报告。\n"
+            f"在插件设置 → 要总结的群 → 这个群的「读取账号」里填上读它的那个 bot（平台实例 id，比如 bot_b）。"
+        )
+        try:
+            sent = await self._push_text(text)
+        except Exception as e:
+            logger.warning(f"[{PLUGIN_NAME}] 提醒发送失败: {e}")
+            return
+        if sent is False:
+            return
+        self.state[key] = int(time.time())
+        self._save_state()
+
     async def _alert_missing_tags(self, group_name: str, gid: str) -> None:
         """某个群没配关心的标签时私聊提醒一次，不反复骚扰。"""
         key = f"warned_tags_{gid}"
@@ -1770,6 +1816,14 @@ class TechDigestPlugin(Star):
         chat = self._chat(gid)
         if chat is None:
             return None, f"群 {gid} 不在配置里", True
+        if not chat.platform:
+            group_name = await self._group_name(gid)
+            await self._alert_missing_platform(group_name, gid)
+            return (
+                None,
+                f"{group_name}：没填「读取账号」，这个群先跳过（每群的读取账号是必填）",
+                False,
+            )
         if not chat.tags_pos:
             group_name = await self._group_name(gid)
             await self._alert_missing_tags(group_name, gid)
@@ -2217,18 +2271,23 @@ class TechDigestPlugin(Star):
                     f"{name}（{gid}）：今日 {len(today_records)} 条 / 带图 {imgs} 条 · "
                     f"上次报告覆盖到 {last}"
                 )
+        parsed = self._parse_umo(self.push_umo)
+        send_desc = (
+            f"{parsed[0]} → QQ {parsed[2]}"
+            if parsed
+            else (self.push_umo or "未配置（不会自动推送）")
+        )
         lines.append(
-            f"读历史账号 {self.platform_id or '未配置'} · 静默账号 "
+            f"发送账号 {send_desc} · 静默账号 "
             f"{'、'.join(self.silence_platforms) or '无（不做静音）'}"
             f"（拦下事件 {self._silenced} / LLM {self._llm_blocked} / 回复 {self._result_blocked}）"
         )
         latest = self._latest_report()
         lines.append(f"最近报告：{latest.name if latest else '无'}")
-        push_state = (
-            f"开（{self.push_umo}）" if self.push_enabled and self.push_umo else "关"
-        )
+        push_state = f"开（{send_desc}）" if self.push_enabled and self.push_umo else "关"
         if self.push_enabled and not self._push_target_ok():
-            push_state = f"⚠ 配置有问题（{self.push_umo or '目标为空'}），不会发送"
+            reason = self._push_cfg_error or f"{self.push_umo or '目标为空'} 不是合法的私聊会话"
+            push_state = f"⚠ 配置有问题（{reason}），不会发送"
         lines.append(
             f"定时生成 {self.daily_time or '关闭'} · 自动推送 {push_state} · "
             f"上限 {self.max_messages} 条 · 每个话题最多 {self.max_images} 张图 · "

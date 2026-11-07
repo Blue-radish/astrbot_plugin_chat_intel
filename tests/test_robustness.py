@@ -90,7 +90,6 @@ def test_apply_chats_survives_empty_inputs():
 
 def test_legacy_group_ids_still_work():
     p, _ = make_plugin()
-    p.platform_id = "mybot"
     p.config = {"group_ids": "220002, 220001"}
     p._apply_chats(None)
     assert p.group_ids == ["220002", "220001"]
@@ -103,24 +102,22 @@ def test_group_ids_parse_ignores_garbage():
     assert p._parse_group_ids() == ["123456"]
 
 
-def test_platform_id_alone_does_not_silence():
+def test_read_account_alone_does_not_silence():
+    """每群的读取账号不会顺带静音任何账号。"""
     from conftest import load_main
 
     mod = load_main()
-    platform, silence = mod.TechDigestPlugin._resolve_silence({"platform_id": "mybot"})
-    assert platform == "mybot"
-    assert silence == []
+    assert mod.TechDigestPlugin._parse_silence({"platform_id": "mybot"}) == []
 
 
 def test_explicit_silence_is_kept():
     from conftest import load_main
 
     mod = load_main()
-    platform, silence = mod.TechDigestPlugin._resolve_silence(
-        {"platform_id": "mybot", "silence_platforms": "bot_b, other"}
-    )
-    assert platform == "mybot"
-    assert silence == ["bot_b", "other"]
+    assert mod.TechDigestPlugin._parse_silence({"silence_platforms": "bot_b, other"}) == [
+        "bot_b",
+        "other",
+    ]
 
 
 # ---------------------------------------------------------------- 零值配置
@@ -242,7 +239,6 @@ def test_history_paging_continues_when_first_page_is_newer_than_window():
         for i in range(5)
     ]
     p, _ = make_plugin()
-    p.platform_id = "p"
     p.data_dir = None
     p.max_messages = 100
     p.include_images = False
@@ -394,3 +390,76 @@ def test_all_chunks_failing_reports_error_and_keeps_cursor():
     assert path is None and is_error is True
     assert "没有给出可用" in info
     assert not p.state["groups"]["1"].get("last_ts")
+
+
+# ---------------------------------------------------------------- 推送目标：两个框填出来
+def test_push_target_built_from_two_simple_fields():
+    from conftest import load_main
+
+    mod = load_main()
+    umo, err = mod.TechDigestPlugin.build_push_target(
+        {"push_platform": "bot_a", "push_uid": "110001"}
+    )
+    assert umo == "bot_a:FriendMessage:110001"
+    assert err == ""
+
+
+def test_push_target_accepts_legacy_full_string():
+    from conftest import load_main
+
+    mod = load_main()
+    umo, err = mod.TechDigestPlugin.build_push_target(
+        {"push_umo": "bot_a:FriendMessage:110001"}
+    )
+    assert umo == "bot_a:FriendMessage:110001"
+    assert err == ""
+
+
+def test_push_target_explains_what_is_missing():
+    from conftest import load_main
+
+    mod = load_main()
+    umo, err = mod.TechDigestPlugin.build_push_target({"push_uid": "110001"})
+    assert umo == "" and "用哪个机器人发" in err
+    umo, err = mod.TechDigestPlugin.build_push_target({"push_platform": "bot_a"})
+    assert umo == "" and "收件人" in err
+    umo, err = mod.TechDigestPlugin.build_push_target(
+        {"push_platform": "bot_a", "push_uid": "改天"}
+    )
+    assert umo == "" and "不是纯数字" in err
+
+
+def test_push_target_only_takes_private_chat():
+    p, _ = make_plugin()
+    p.push_enabled = True
+    p.push_umo = "bot_a:FriendMessage:110001"
+    assert p._parse_umo(p.push_umo) == ("bot_a", "FriendMessage", "110001")
+
+
+# ---------------------------------------------------------------- 缺读取账号就跳过
+def test_group_without_read_account_is_skipped_with_hint():
+    p, _ = make_plugin()
+    p.chats = [ChatInterest("1", "", ("甲",))]
+    p.group_ids = ["1"]
+    p.state = {}
+    p._save_state = lambda: None
+    p._group_name = lambda gid: asyncio.sleep(0, result="空账号群")
+    pushed: list[str] = []
+
+    async def fake_push(text):
+        pushed.append(text)
+        return True
+
+    p._push_text = fake_push
+
+    async def fail_render(*a, **k):
+        raise AssertionError("不该走到排版")
+
+    p._render = fail_render
+    path, info, is_error = asyncio.run(p.generate_group("1", 0, 1, "今天", False))
+    assert path is None and is_error is False
+    assert "没填「读取账号」" in info
+    assert pushed and "读取账号" in pushed[0]
+    # 同一个群只提醒一次
+    asyncio.run(p.generate_group("1", 0, 1, "今天", False))
+    assert len(pushed) == 1
