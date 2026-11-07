@@ -23,7 +23,7 @@
 
 ```bash
 cd <AstrBot>/data/plugins
-git clone https://github.com/<you>/astrbot_plugin_tech_digest
+git clone https://github.com/Blue-radish/astrbot_plugin_tech_digest
 ```
 
 然后在 WebUI 的「插件管理」里重载，或在配置里启用。

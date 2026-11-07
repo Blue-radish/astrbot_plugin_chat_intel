@@ -67,7 +67,10 @@ USER_PROMPT_TEMPLATE = """下面是群「{group}」在 {window} 的聊天记录�
 1. 与技术无关的一律不要：吃饭、游戏内容、情感恋爱、追星、地域或时政争吵、纯玩梗复读。
 2. 数量上限：topics 5 条、tools 8 条、jobs 5 条、ai_news 5 条、quotes 4 条。宁少勿凑，没有就返回空数组。
 3. 记录里没有的东西绝对不要编造；url 只能照抄记录中出现过的链接。
-4. 只输出 JSON 本体，不要 markdown 代码块，不要任何解释文字。
+4. tools 只在「记录里出现链接、仓库/项目名并说明了用途，或有人真的在用它」时收录；
+   只是顺口提一句产品名（例如"我现在都不用 GitHub 了"）不要收录。
+5. 纯情绪、纯吐槽、没有信息量的话题（"这个好难啊""怎么办"）不要单独成条，除非里面有具体报错、版本、命令或方案。
+6. 只输出 JSON 本体，不要 markdown 代码块，不要任何解释文字。
 
 聊天记录：
 {transcript}"""
@@ -553,7 +556,11 @@ class TechDigestPlugin(Star):
             payload = {
                 "title": self.report_title,
                 "date": now.strftime("%Y-%m-%d"),
-                "group": f"{group_name} · {self.group_id}",
+                "group": (
+                    group_name
+                    if self.group_id in group_name
+                    else f"{group_name} · {self.group_id}"
+                ),
                 "stats": {"line": f"{msg_count} 条消息 · {people} 人参与 · 采样{window}"},
                 "headline": str(data.get("headline") or "").strip(),
                 "topics": self._norm_list(data.get("topics"), ("title", "detail", "people")),

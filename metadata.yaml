@@ -7,5 +7,5 @@ desc: >-
   用本地 Typst 排版成一张长图，落盘到插件数据目录，永不发回群里；到点私聊推给你，也可用命令随时生成。
 version: 1.0.0
 author: Ray
-repo: ""
+repo: "https://github.com/Blue-radish/astrbot_plugin_tech_digest"
 astrbot_version: ">=4.28.1"
