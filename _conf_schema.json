@@ -1,40 +1,55 @@
 {
-  "group_id": {
+  "group_ids": {
     "type": "string",
-    "description": "要总结的群号（必填）",
+    "description": "要监控的群号，多个用逗号分隔（必填）",
     "default": "",
-    "hint": "例如 123456789；生成前必须填好"
+    "hint": "例如 220002,220001；报告里只显示群名，不显示群号"
   },
-  "group_name": {
+  "group_names": {
     "type": "string",
-    "description": "群名（留空自动获取）",
-    "default": ""
-  },
-  "use_local_store": {
-    "type": "bool",
-    "description": "本地累积群消息（推荐开）",
-    "default": true,
-    "hint": "OneBot 历史接口通常只给最近约 200 条；开着才能在机器人常驻时覆盖一整天"
+    "description": "群名备注，留空则自动检测；格式 群号=群名，多个用逗号分隔",
+    "default": "",
+    "hint": "例如 220002=MeowShelter,220001=極東電子考古學結社"
   },
   "platform_id": {
     "type": "string",
-    "description": "用哪个 AstrBot 平台实例去拉消息（该账号必须在群里）",
-    "default": "",
-    "hint": "填 aiocqhttp / napcat 实例的 id，例如 bot_b"
+    "description": "用哪个 AstrBot 平台实例去拉消息（该账号必须在这些群里）",
+    "default": ""
   },
   "days": {
     "type": "float",
-    "description": "回溯多少天",
+    "description": "首次生成（还没有上次记录）时回溯多少天",
     "default": 1.0
   },
   "max_messages": {
     "type": "int",
-    "description": "单次最多拉多少条消息",
-    "default": 1500
+    "description": "单个群单次最多处理多少条消息",
+    "default": 10000
+  },
+  "use_local_store": {
+    "type": "bool",
+    "description": "本地累积群消息（强烈建议开）",
+    "default": true,
+    "hint": "OneBot 历史接口只给最近约 200 条，长时段总结依赖本地累积"
+  },
+  "include_images": {
+    "type": "bool",
+    "description": "保存群里的图片并挑进报告",
+    "default": true
+  },
+  "max_images": {
+    "type": "int",
+    "description": "每份报告最多放几张图",
+    "default": 6
+  },
+  "max_image_mb": {
+    "type": "int",
+    "description": "单张图片大小上限（MB），超过就丢弃",
+    "default": 8
   },
   "daily_time": {
     "type": "string",
-    "description": "每天自动生成的时间（HH:MM），留空则不定时",
+    "description": "每天自动生成的时间（HH:MM），留空则不定时；只总结上次之后的新消息",
     "default": "23:00"
   },
   "push_enabled": {

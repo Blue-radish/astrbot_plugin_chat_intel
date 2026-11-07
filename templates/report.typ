@@ -21,6 +21,7 @@
 #let news = d.at("ai_news", default: ())
 #let quotes = d.at("quotes", default: ())
 #let stats = d.at("stats", default: (:))
+#let shots = d.at("images", default: ())
 
 #set document(title: d.at("title", default: "技术情报日报"))
 #set page(width: 700pt, height: auto, margin: (x: 22pt, y: 20pt), fill: bg, numbering: none)
@@ -122,6 +123,27 @@
   ]
 ]
 
+// ============ 现场图片 ============
+#if shots.len() > 0 [
+  #sec(c2, "现场图片")
+  #grid(
+    columns: if shots.len() == 1 { (1fr,) } else { (1fr, 1fr) },
+    gutter: 8pt,
+    row-gutter: 10pt,
+    ..shots.map(s => block(
+      width: 100%,
+      fill: card,
+      radius: 5pt,
+      inset: 6pt,
+      stroke: 0.5pt + hair,
+    )[
+      #image(s.at("path"), width: 100%, height: 150pt, fit: "contain")
+      #v(3pt)
+      #text(size: 7.5pt, fill: faint, s.at("caption", default: ""))
+    ]),
+  )
+]
+
 // ============ 今日圣经 ============
 #if quotes.len() > 0 [
   #sec(c5, "今日圣经")
@@ -141,13 +163,12 @@
 ]
 
 // ============ 全空兜底 ============
-#if topics.len() + tools.len() + jobs.len() + news.len() + quotes.len() == 0 [
+#if topics.len() + tools.len() + jobs.len() + news.len() + quotes.len() + shots.len() == 0 [
   #v(10pt)
   #block(width: 100%, fill: card, radius: 5pt, inset: 14pt, stroke: 0.5pt + hair)[
     #text(size: 10pt, fill: sub, "这段时间群里没有值得汇报的技术内容。")
   ]
 ]
-
 // ============ 页脚 ============
 #v(8pt)
 #line(length: 100%, stroke: 0.5pt + hair)

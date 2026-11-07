@@ -1,6 +1,7 @@
 """渲染 logo 与 README 样张（离线，不需要 AstrBot / 不需要模型）。
 
     python scripts/render_assets.py --fonts ./fonts
+    python scripts/render_assets.py --fonts ./fonts --scene light
 """
 
 import argparse
@@ -19,19 +20,68 @@ LOGO = ROOT / "assets" / "logo.typ"
 
 FOOTER = f"生成于 {datetime.now():%Y-%m-%d %H:%M} · astrbot_plugin_tech_digest · 本报告不会发到群里"
 
-# 一场聊得比较开的日子
+# 群里贴的报错截图（样张占位，用 Typst 画，避免往仓库塞真实群图）
+SHOT_TERMINAL = """
+#set page(width: 720pt, height: auto, margin: 0pt, fill: rgb("#0f172a"))
+#set text(font: ("ShareTechMono", "Noto Sans SC"), size: 12pt, fill: rgb("#cbd5e1"))
+#block(inset: 18pt)[
+  #text(fill: rgb("#67e8f9"), "$ npm run build")
+  #linebreak()
+  #text(fill: rgb("#fca5a5"), "ERROR in ./src/app.tsx:42:18")
+  #linebreak()
+  #text(fill: rgb("#fca5a5"), "TS2345: Argument of type 'string' is not assignable to parameter of type 'number'.")
+  #linebreak()
+  #text(fill: rgb("#94a3b8"), "    42 |   const total = sum(items)")
+  #linebreak()
+  #text(fill: rgb("#94a3b8"), "       |                  ^")
+  #linebreak()
+  #v(8pt)
+  #text(fill: rgb("#94a3b8"), "webpack 5.91.0 compiled with 1 error in 3142 ms")
+]
+"""
+
+SHOT_CHART = """
+#set page(width: 720pt, height: auto, margin: 0pt, fill: rgb("#ffffff"))
+#set text(font: ("Inter", "Noto Sans SC"), size: 12pt, fill: rgb("#334155"))
+#let bars = ((38, "a"), (52, "b"), (120, "c"), (46, "d"))
+#block(inset: 20pt)[
+  #text(size: 14pt, weight: "bold", fill: rgb("#0f172a"), "接口耗时 p99（ms）")
+  #v(16pt)
+  #grid(
+    columns: (1fr,) * 4,
+    align: center + bottom,
+    gutter: 12pt,
+    ..bars.map(((h, lab)) => block(
+      width: 46pt,
+      height: h * 2.4pt,
+      fill: if h > 100 { rgb("#f97316") } else { rgb("#3b82f6") },
+      radius: 3pt,
+    )),
+  )
+  #v(8pt)
+  #grid(
+    columns: (1fr,) * 4,
+    align: center,
+    gutter: 12pt,
+    ..bars.map(((h, lab)) => text(size: 10pt, fill: rgb("#64748b"), lab)),
+  )
+  #v(10pt)
+  #text(size: 10pt, fill: rgb("#94a3b8"), "c 版本回归到 120ms，定位在缓存 key 少了版本号")
+]
+"""
+
 SCENE_FULL = {
     "title": "技术情报日报",
     "date": "2026-11-07",
-    "group": "示例群 · 123456789",
-    "stats": {"line": "1286 条消息 · 34 人参与 · 采样最近 1 天"},
+    "group": "MeowShelter",
+    "stats": {"line": "1286 条消息 · 34 人参与 · 今天"},
     "headline": "今天群里主要在修 CI、聊论文 novelty，以及远程开发机怎么配。",
     "topics": [
         {
             "title": "CI 报错与持续集成",
             "detail": "A 同学的流水线在 lint 阶段挂掉，报错是 eslint 9 与 @typescript-eslint 版本不匹配；"
             "B 同学指出持续集成只管「每次提交都跑一遍」，报错要落到具体步骤名上才好定位，"
-            "最后改成拆成 lint / test 两个 job。",
+            "最后改成拆成 lint / test 两个 job（有配图）。",
             "people": "A同学、B同学",
         },
         {
@@ -41,9 +91,9 @@ SCENE_FULL = {
             "people": "C同学、D同学",
         },
         {
-            "title": "远程开发机方案",
-            "detail": "E 同学想用远程桌面 + 内网穿透把公司电脑当开发机；讨论到 Tailscale 与 frp 的取舍，"
-            "结论是先用 Tailscale，延迟和配置成本更低。",
+            "title": "接口 p99 回归",
+            "detail": "E 同学发现 c 环境 p99 从 52ms 涨到 120ms，最后定位在缓存 key 少了版本号，"
+            "命中率掉到 0；补上版本号后回到 46ms（有配图）。",
             "people": "E同学、F同学",
         },
     ],
@@ -75,12 +125,11 @@ SCENE_FULL = {
     "footer": FOOTER,
 }
 
-# 只聊了两句技术的日子
 SCENE_LIGHT = {
     "title": "技术情报日报",
     "date": "2026-11-08",
-    "group": "示例群 · 123456789",
-    "stats": {"line": "412 条消息 · 21 人参与 · 采样最近 1 天"},
+    "group": "極東電子考古學結社",
+    "stats": {"line": "412 条消息 · 21 人参与 · 昨天"},
     "headline": "今天只有零星技术讨论：一个 Docker 构建缓存问题，加一个开源项目推荐。",
     "topics": [
         {
@@ -105,12 +154,11 @@ SCENE_LIGHT = {
     "footer": FOOTER,
 }
 
-# 完全没技术话题的日子（走空状态兜底）
 SCENE_QUIET = {
     "title": "技术情报日报",
     "date": "2026-11-09",
-    "group": "示例群 · 123456789",
-    "stats": {"line": "233 条消息 · 15 人参与 · 采样最近 1 天"},
+    "group": "MeowShelter",
+    "stats": {"line": "233 条消息 · 15 人参与 · 最新消息"},
     "headline": "",
     "topics": [],
     "tools": [],
@@ -121,18 +169,46 @@ SCENE_QUIET = {
 }
 
 SCENES = {
-    "full": SCENE_FULL,
-    "light": SCENE_LIGHT,
-    "quiet": SCENE_QUIET,
+    "full": (SCENE_FULL, (SHOT_TERMINAL, SHOT_CHART)),
+    "light": (SCENE_LIGHT, ()),
+    "quiet": (SCENE_QUIET, ()),
 }
 
 
+def _compile_typst_source(source: str, out: Path, fonts: str, ppi: int) -> None:
+    job = Path(tempfile.mkdtemp(prefix="tech_digest_shot_"))
+    try:
+        (job / "main.typ").write_text(source, encoding="utf-8")
+        kwargs = {"font_paths": [fonts]} if fonts else {}
+        typst.compile(
+            str(job / "main.typ"),
+            output=str(out),
+            root=str(job),
+            format="png",
+            ppi=ppi,
+            **kwargs,
+        )
+    finally:
+        shutil.rmtree(job, ignore_errors=True)
+
+
 def render_report(scene: str, out: Path, fonts: str, ppi: int) -> None:
+    payload, shots = SCENES[scene]
     job = Path(tempfile.mkdtemp(prefix="tech_digest_"))
     try:
         shutil.copyfile(TEMPLATE, job / "main.typ")
+        img_dir = job / "img"
+        img_dir.mkdir(exist_ok=True)
+        payload = dict(payload)
+        payload["images"] = []
+        for i, source in enumerate(shots):
+            dst = img_dir / f"{i}.png"
+            _compile_typst_source(source, dst, fonts, 140)
+            payload["images"].append(
+                {"path": f"img/{dst.name}", "caption": f"示例成员{i + 1} · 11-07 1{i + 2}:04"}
+            )
         (job / "data.json").write_text(
-            json.dumps(SCENES[scene], ensure_ascii=False), encoding="utf-8"
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8"
         )
         kwargs = {"font_paths": [fonts]} if fonts else {}
         typst.compile(
@@ -169,10 +245,10 @@ def main() -> None:
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    targets = list(SCENES.keys()) if args.scene == "all" else [args.scene]
     if args.scene in ("all", "logo"):
         render_logo(out_dir / "logo.png", args.fonts)
         print(f"  logo      -> {out_dir / 'logo.png'}")
+    targets = list(SCENES.keys()) if args.scene == "all" else [args.scene]
     for scene in targets:
         if scene == "logo":
             continue
