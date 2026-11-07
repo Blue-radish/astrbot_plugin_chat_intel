@@ -18,3 +18,6 @@ messages/
 .vscode/
 .idea/
 .DS_Store
+
+# superpowers 工作区（ledger / briefs / 评审包）
+.superpowers/
