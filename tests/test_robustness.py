@@ -411,7 +411,7 @@ def test_push_target_accepts_legacy_full_string():
     mod = load_main()
     cfg = {"push_umo": "bot_a:FriendMessage:110001"}
     assert mod.TechDigestPlugin.build_push_target(cfg)[0] == ""
-    assert mod.TechDigestPlugin.migrate_push_target(cfg, {}) == "bot_a:FriendMessage:110001"
+    assert mod.TechDigestPlugin.migrate_push_target(cfg, {})[0] == "bot_a:FriendMessage:110001"
     assert mod.TechDigestPlugin.build_push_target(cfg)[0] == "bot_a:FriendMessage:110001"
 
 

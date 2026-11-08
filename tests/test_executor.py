@@ -353,7 +353,7 @@ def test_legacy_only_config_still_works():
 
     mod = load_main()
     cfg = {"push_umo": "bot_a:FriendMessage:1"}
-    assert mod.TechDigestPlugin.migrate_push_target(cfg, {}) == "bot_a:FriendMessage:1"
+    assert mod.TechDigestPlugin.migrate_push_target(cfg, {})[0] == "bot_a:FriendMessage:1"
 
 
 # ---------------------------------------------------------------- 定时时间规范化

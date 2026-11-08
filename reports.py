@@ -242,7 +242,16 @@ def entries(state: dict, umo: str) -> list[dict]:
 
 
 def _store(state: dict, umo: str, items: list[dict]) -> None:
-    _conv(state, umo)["reports"] = items[-INDEX_KEEP:]
+    """「只留最近三份」只约束**已生成**的报告。
+
+    还在跑的占位不算在名额里：一次总结四个群，四个占位要是被截掉一个，
+    「还有哪份没跑完」就会漏报。顺序保持原样，别让占位全跑到前面去。
+    """
+    done = [entry for entry in items if _phase(entry) != "generating"]
+    keep = {id(entry) for entry in done[-INDEX_KEEP:]}
+    _conv(state, umo)["reports"] = [
+        entry for entry in items if _phase(entry) == "generating" or id(entry) in keep
+    ]
 
 
 def _phase(entry: dict) -> str:
@@ -291,13 +300,21 @@ def status_of(entry: dict) -> str:
     return "delivered" if delivered else "generated"
 
 
-def mark_generating(state: dict, umo: str, *, gid: str, group: str, label: str, now=None) -> dict:
-    """「我让你跑的那份」：先把占位记下，跑完再换成真报告。"""
+def mark_generating(
+    state: dict, umo: str, *, gid: str, group: str, label: str, now=None, token: float = 0.0
+) -> dict:
+    """「我让你跑的那份」：先把占位记下，跑完再换成真报告。
+
+    token 是这次提交的标识。同群同标签的两份请求是两件事（一份在跑、一份排队），
+    不能互相顶掉——以前按「同群同标签」去重，第二次登记会把第一次的占位删掉，
+    于是第一份跑完后排队那份在索引里看不见了。
+    """
     entry = {
         "id": "",
         "gid": str(gid or ""),
         "group": str(group or ""),
         "label": str(label or ""),
+        "at": float(token or 0.0),
         "ts": int(now or time.time()),
         "phase": "generating",
         "topics": [],
@@ -309,6 +326,7 @@ def mark_generating(state: dict, umo: str, *, gid: str, group: str, label: str, 
             _phase(old) == "generating"
             and old.get("gid") == entry["gid"]
             and old.get("label") == entry["label"]
+            and old.get("at") == entry["at"]
         )
     ]
     items.append(entry)
@@ -338,8 +356,8 @@ def resolve(state: dict, umo: str, record: dict, stored: bool = True) -> dict:
         "incomplete": record.get("status") == "incomplete",
     }
     items = entries(state, umo)
-    for index in range(len(items) - 1, -1, -1):
-        old = items[index]
+    # 从最早的那条占位认领：队列是先进先出，刚跑完的是最先提交的那份
+    for index, old in enumerate(items):
         if (
             _phase(old) == "generating"
             and old.get("gid") == entry["gid"]

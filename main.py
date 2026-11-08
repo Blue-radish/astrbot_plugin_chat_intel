@@ -168,9 +168,10 @@ class DigestRequest:
     label: str
     incremental: bool
     gid: str | None = None  # None = 所有群
+    at: float = 0.0  # 提交时刻：同群同标签的两份请求靠它区分
 
 
-@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.15")
+@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.16")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -348,39 +349,65 @@ class TechDigestPlugin(Star):
         return f"{platform}:FriendMessage:{uid}", ""
 
     @staticmethod
-    def migrate_push_target(config: dict, state: dict) -> str:
+    def migrate_push_target(config: dict, state: dict) -> tuple[str, str]:
         """老配置的一次性迁移：把整串 push_umo 拆进两个可见字段。
 
+        返回 (推送目标, 出错说明)。**只迁私聊**：`xxx:GroupMessage:123` 里的 123 是群号，
+        当成 QQ 号拼成 `FriendMessage` 就是发给另一个人。这种配置宁可停用、把原因说清楚，
+        也不能猜——用户以为是群，实际发给陌生人。
+
         宿主（AstrBotConfig）加载时会按 schema 补齐默认值，所以「新字段存在」不代表用户
-        填过；只能用状态文件里的一次性标记判断是否已经迁过。
-        返回迁移后的推送目标（没有就是空串）。
+        填过；只能用状态文件里的一次性标记判断是否已经迁过。标记由调用方在**配置真的
+        落盘之后**才写（见 `_migrate_legacy_config`），否则保存失败也会被标记挡住重试。
         """
         config = config or {}
         if state is None:
             state = {}
         if state.get("config_migrated_v224"):
-            return TechDigestPlugin.build_push_target(config)[0]
+            return TechDigestPlugin.build_push_target(config)
         legacy = str(config.get("push_umo") or "").strip()
         platform = str(config.get("push_platform") or "").strip()
         uid = str(config.get("push_uid") or "").strip()
+        note = ""
         if legacy and not platform and not uid:
             parsed = TechDigestPlugin._parse_umo(legacy)
-            if parsed:
-                plat, _mtype, target = parsed
-                if target.isdigit():
+            if not parsed:
+                note = (
+                    f"旧推送目标「{legacy}」认不出来，已停用；"
+                    "请在设置里填「发信账号 + 收件人 QQ」"
+                )
+            else:
+                plat, mtype, target = parsed
+                if not target.isdigit():
+                    note = (
+                        f"旧推送目标「{legacy}」的收件人不是 QQ 号，已停用；"
+                        "请在设置里填「发信账号 + 收件人 QQ」"
+                    )
+                elif str(mtype).lower() not in TechDigestPlugin._PRIVATE_TYPES:
+                    note = (
+                        f"旧推送目标「{legacy}」不是私聊（{mtype}），升级后不再自动迁移："
+                        "群号当 QQ 号会发给另一个人。请在设置里填「发信账号 + 收件人 QQ」"
+                    )
+                else:
                     try:
                         config["push_platform"] = plat
                         config["push_uid"] = target
                     except Exception as e:
                         logger.warning(f"[{PLUGIN_NAME}] 迁移推送目标失败: {e}")
+                        note = (
+                            f"旧推送目标「{legacy}」搬不进设置项（{e}），"
+                            "请在设置里填「发信账号 + 收件人 QQ」"
+                        )
                     else:
                         logger.warning(
                             f"[{PLUGIN_NAME}] 旧推送目标「{legacy}」已搬进"
                             f"「发信账号 {plat} / 收件人 QQ {target}」两个字段；"
                             "以后在设置里清空就真的不推送了"
                         )
-        state["config_migrated_v224"] = True
-        return TechDigestPlugin.build_push_target(config)[0]
+        if note:
+            logger.warning(f"[{PLUGIN_NAME}] {note}")
+            return "", note
+        return TechDigestPlugin.build_push_target(config)
 
     @staticmethod
     def migrate_chat_platforms(rows, legacy_id: str) -> list[str]:
@@ -688,8 +715,11 @@ class TechDigestPlugin(Star):
         if not started and not self._enqueue(req):
             return False, f"已经在跑一份、后面还排着 {QUEUE_MAX} 份了，等它们跑完再叫我。"
         # 记下「这个会话在等哪几份报告」：用户回头问「跑完了吗」才有依据
+        token = req.at or time.time()
         for gid, name in self._submit_targets(req):
-            reports.mark_generating(self.state, req.umo, gid=gid, group=name, label=req.label)
+            reports.mark_generating(
+                self.state, req.umo, gid=gid, group=name, label=req.label, token=token
+            )
         self._save_state()
         if not started:
             return False, "上一份还在生成，这份已经排队，跑完接着发。"
@@ -3256,12 +3286,16 @@ class TechDigestPlugin(Star):
     def _migrate_legacy_config(self) -> None:
         """把老配置里隐藏的旧值搬进可见字段，只做一次。"""
         if self.state.get("config_migrated_v224"):
+            # 迁过了，但上次留下的提醒（旧目标不是私聊之类）还得继续显示：
+            # 自动推送本来就是静默的，提醒要是也跟着消失，用户看不出为什么收不到
+            if not self._push_cfg_error and not self.push_umo:
+                self._push_cfg_error = str(self.state.get("push_migrate_note") or "")
             return
         before = (
             str(self.config.get("push_platform") or ""),
             str(self.config.get("push_uid") or ""),
         )
-        self.migrate_push_target(self.config, self.state)
+        _target, note = self.migrate_push_target(self.config, self.state)
         after = (
             str(self.config.get("push_platform") or ""),
             str(self.config.get("push_uid") or ""),
@@ -3275,18 +3309,32 @@ class TechDigestPlugin(Star):
                 f"{filled}；建议在设置里改成明确的账号"
             )
         migrated = (after != before) or bool(filled)
-        if migrated and not self._save_config():
+        saved = self._save_config() if migrated else True
+        if migrated and not saved:
+            # 不打标记：先打标记再保存，一旦保存失败，下次启动会读到旧配置却跳过迁移，
+            # 推送目标就静默变成空——日志说「下次再试」，实际永远不会试
             logger.error(
-                f"[{PLUGIN_NAME}] 迁移结果写不回配置文件，下次启动会再试一次"
+                f"[{PLUGIN_NAME}] 迁移结果写不回配置文件，这次不打「已迁移」标记，"
+                "下次启动会再试一次"
             )
+        else:
+            self.state["config_migrated_v224"] = True
+            if note:
+                # 旧目标不能用：把原因留在状态里，重启后仍能提醒用户重填
+                self.state["push_migrate_note"] = note
+            else:
+                self.state.pop("push_migrate_note", None)
+            try:
+                self._save_state()
+            except Exception as e:
+                logger.warning(f"[{PLUGIN_NAME}] 迁移标记写入失败: {e}")
         # 迁移可能改了 config，重新按最终值算一遍
         if filled:
             self._apply_chats(self.config.get("chats"))
         self.push_umo, self._push_cfg_error = self.build_push_target(self.config)
-        try:
-            self._save_state()
-        except Exception as e:
-            logger.warning(f"[{PLUGIN_NAME}] 迁移标记写入失败: {e}")
+        if not self._push_cfg_error and not self.push_umo:
+            # 上次迁移留下的提醒（旧目标不是私聊之类的），别让它在重启后消失
+            self._push_cfg_error = str(self.state.get("push_migrate_note") or "")
 
     def _save_config(self) -> bool:
         """把内存里的 config 落盘（AstrBot 的 AstrBotConfig 才有 save_config）。"""

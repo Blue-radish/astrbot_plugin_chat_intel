@@ -142,21 +142,21 @@ def test_astrbot_loader_fills_new_keys_and_would_kill_legacy_target(tmp_path):
     assert mod.TechDigestPlugin.build_push_target(cfg)[0] == ""
 
     state = {}
-    umo = mod.TechDigestPlugin.migrate_push_target(cfg, state)
-    assert umo == "bot_a:FriendMessage:110001"
+    umo, note = mod.TechDigestPlugin.migrate_push_target(cfg, state)
+    assert umo == "bot_a:FriendMessage:110001" and note == ""
     assert cfg.get("push_platform") == "bot_a"
     assert cfg.get("push_uid") == "110001"
-    assert state.get("config_migrated_v224") is True
+    # 标记不再由 migrate_push_target 写：得等配置真的落盘（见 test_migration_safety）
 
 
 def test_after_migration_user_clearing_really_clears():
     mod = load_main()
     cfg = {"push_platform": "bot_a", "push_uid": "110001"}
     state = {}
-    assert mod.TechDigestPlugin.migrate_push_target(cfg, state) == "bot_a:FriendMessage:110001"
+    assert mod.TechDigestPlugin.migrate_push_target(cfg, state)[0] == "bot_a:FriendMessage:110001"
     cfg["push_platform"] = ""
     cfg["push_uid"] = ""
-    assert mod.TechDigestPlugin.migrate_push_target(cfg, state) == ""
+    assert mod.TechDigestPlugin.migrate_push_target(cfg, state)[0] == ""
     assert mod.TechDigestPlugin.build_push_target(cfg)[0] == ""
 
 
@@ -164,7 +164,7 @@ def test_migration_runs_only_once():
     mod = load_main()
     cfg = {"push_umo": "bot_a:FriendMessage:110001"}
     state = {"config_migrated_v224": True}
-    assert mod.TechDigestPlugin.migrate_push_target(cfg, state) == ""
+    assert mod.TechDigestPlugin.migrate_push_target(cfg, state)[0] == ""
 
 
 # ---------------------------------------------------------------- 3. 合并排序
