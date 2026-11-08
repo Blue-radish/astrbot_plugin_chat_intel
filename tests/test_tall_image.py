@@ -29,30 +29,30 @@ def _texty(path: Path, width: int = 400, height: int = 4000, line: int = 18) -> 
 
 
 # ---------------------------------------------------------------- 排版方案
-def test_plan_short_image_is_normal():
-    assert imaging.plan_tall(800, 600) is None
-    assert imaging.plan_tall(800, 1500) is None  # 比例 1.875 < 2.2
+def test_plan_landscape_image_keeps_single_column():
+    plan = imaging.plan_image(800, 600)
+    assert plan["cols"] == 1 and plan["w"] < 1.0, "横图整体缩，不切段"
 
 
-def test_plan_tall_image_takes_full_row():
-    plan = imaging.plan_tall(400, 2400)  # 比例 6
-    assert plan and plan["cols"] == 1, "能看清的长图应该独占整行，不该被切成几列"
+def test_plan_portrait_image_is_stacked_when_too_tall():
+    plan = imaging.plan_image(800, 1500)  # 比值 1.875：单张摆会超过高度预算
+    assert plan["cols"] == 2 and plan["w"] == 1.0
 
 
-def test_plan_absurdly_tall_image_is_stacked():
-    assert imaging.plan_tall(400, 4000)["cols"] == 1, "比例 10 还是铺满一行更清楚"
-    assert imaging.plan_tall(400, 6000)["cols"] == 2, "比例 15 才分段"
-    assert imaging.plan_tall(400, 20000)["cols"] == imaging.SLICE_MAX
+def test_plan_absurdly_tall_image_uses_all_columns():
+    for height in (4000, 6000, 20000):
+        assert imaging.plan_image(400, height)["cols"] == imaging.SLICE_MAX
 
 
 def test_plan_caps_column_count():
-    assert imaging.plan_tall(400, 100000)["cols"] == imaging.SLICE_MAX
+    assert imaging.plan_image(400, 100000)["cols"] == imaging.SLICE_MAX
 
 
-def test_broken_file_is_normal(tmp_path):
+def test_broken_file_falls_back_to_full_width(tmp_path):
     bad = tmp_path / "broken.jpg"
     bad.write_bytes(b"not really an image")
-    assert imaging.plan_tall_file(bad) is None
+    plan = imaging.plan_image_file(bad)
+    assert plan["cols"] == 1 and plan["w"] == 1.0
 
 
 # ---------------------------------------------------------------- 切点
@@ -92,10 +92,10 @@ def test_panels_split_cleanly_on_blank_row():
 
 
 # ---------------------------------------------------------------- 合成
-def test_compose_skips_image_that_fits_full_row(tmp_path):
-    src = _flat(tmp_path / "tall.jpg", 400, 2400)
+def test_compose_skips_image_that_fits_single_column(tmp_path):
+    src = _flat(tmp_path / "wide.jpg", 1200, 900)
     dst = tmp_path / "out.png"
-    assert imaging.compose_tall_image(src, dst) is None, "独占整行的长图不需要合成"
+    assert imaging.compose_tall_image(src, dst) is None, "单张摆得下的图不需要合成"
     assert not dst.exists()
 
 
@@ -115,7 +115,7 @@ def test_compose_never_splits_text_lines(tmp_path):
     assert imaging.compose_tall_image(src, dst) == dst
     with Image.open(src) as im:
         blank = imaging.blank_rows(im)
-        cuts = imaging.cut_positions(im.size[1], imaging.plan_tall(*im.size)["cols"], blank)
+        cuts = imaging.cut_positions(im.size[1], imaging.plan_image(*im.size)["cols"], blank)
     bounds = imaging.panel_bounds(im.size[1], cuts)
     for (top_a, bottom_a), (top_b, _bottom_b) in zip(bounds, bounds[1:]):
         seam = bottom_a if bottom_a <= top_b else top_b
@@ -159,8 +159,8 @@ def _payload(tall_dir: Path, src: Path):
     }
 
 
-def test_render_marks_tall_image_wide(tmp_path):
-    """文字长图在报告里要独占一行（wide），否则挤在两列里字只有一半大小。"""
+def test_render_passes_explicit_width(tmp_path):
+    """模板不再按固定高度摆图，每张图带着自己的宽度比例。"""
     mod = load_main()
     p = _render_plugin(mod, tmp_path)
     tall = _flat(tmp_path / "tall.jpg", 300, 1800)
@@ -168,7 +168,8 @@ def test_render_marks_tall_image_wide(tmp_path):
     out = p._render(payload, "1", "今天")
     assert out is not None and out.is_file()
     entry = payload["topics"][0]["images"][0]
-    assert entry.get("wide") is True
+    assert "wide" not in entry, "wide 已经换成显式宽度"
+    assert entry["w"] == 1.0, "这张要切段横排，铺满版心"
     with Image.open(out) as im:
         assert im.size[1] > 100
 
@@ -181,5 +182,17 @@ def test_render_composes_absurdly_tall_image(tmp_path):
     out = p._render(payload, "1", "今天")
     assert out is not None and out.is_file()
     entry = payload["topics"][0]["images"][0]
-    assert entry.get("wide") is True
+    assert entry["w"] == 1.0
     assert entry["path"].endswith(".png"), "分段横排过的长图应该指向合成图"
+
+
+def test_render_scales_small_image_down_to_its_pixels(tmp_path):
+    """1200×900 的截图不该被压成 200pt 高的小条，也不该拉满版心。"""
+    mod = load_main()
+    p = _render_plugin(mod, tmp_path)
+    shot = _flat(tmp_path / "shot.jpg", 1200, 900)
+    payload = _payload(tmp_path, shot)
+    out = p._render(payload, "1", "今天")
+    assert out is not None and out.is_file()
+    entry = payload["topics"][0]["images"][0]
+    assert 0.6 <= entry["w"] <= 0.9, f"按像素比应该接近 0.66，实际 {entry['w']}"

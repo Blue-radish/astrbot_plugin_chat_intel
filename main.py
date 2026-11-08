@@ -170,7 +170,7 @@ class DigestRequest:
     gid: str | None = None  # None = 所有群
 
 
-@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.12")
+@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.13")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -2122,15 +2122,13 @@ class TechDigestPlugin(Star):
         return [i for _score, i in scored]
 
     # ------------------------------------------------------------------ 渲染
-    # 长图（超长竖图）处理：实现在 imaging.py，出图脚本也复用同一套
-    TALL_RATIO = imaging.TALL_RATIO
-    STACK_RATIO = imaging.STACK_RATIO
+    # 图片排版（够大又不超高度预算）：实现在 imaging.py，出图脚本也复用同一套
     SLICE_MAX = imaging.SLICE_MAX
 
     @staticmethod
-    def plan_tall_image(src: Path) -> dict | None:
-        """这张图要不要特殊排版：None 普通图；cols=1 铺满整行；cols≥2 分段横排。"""
-        return imaging.plan_tall_file(src)
+    def plan_image(src: Path) -> dict:
+        """这张图怎么摆：{"cols": 1..3, "w": 占版心宽度的比例}。"""
+        return imaging.plan_image_file(src)
 
     @staticmethod
     def compose_tall_image(src: Path, dst: Path) -> Path | None:
@@ -2163,11 +2161,11 @@ class TechDigestPlugin(Star):
                     src = Path(img.get("path") or "")
                     if not src.is_file():
                         continue
-                    # 长图分两种：普通高的整张铺满一行（字最大），离谱高的才分段横排
+                    # 尺寸由 imaging.plan_image 算：够大又不超高度预算，太长的切段横排
                     seq += 1
-                    plan = self.plan_tall_image(src)
+                    plan = self.plan_image(src)
                     composed = img_dir / f"{seq}.png"
-                    sliced = bool(plan and plan.get("cols", 0) >= 2) and (
+                    sliced = plan["cols"] >= 2 and (
                         self.compose_tall_image(src, composed) == composed
                     )
                     if sliced:
@@ -2179,10 +2177,12 @@ class TechDigestPlugin(Star):
                             shutil.copyfile(src, dst)
                         except Exception:
                             continue
-                    entry = {"path": f"img/{dst.name}", "caption": img.get("caption") or ""}
-                    if sliced or plan:
-                        # 长图铺满版心：挤在两列里字只有一半大小，手机上读不了
-                        entry["wide"] = True
+                    entry = {
+                        "path": f"img/{dst.name}",
+                        "caption": img.get("caption") or "",
+                        # 铺满版心的比例：切段后是 1.0，单张按像素比折算（可能是 0.4~0.9）
+                        "w": 1.0 if sliced else float(plan.get("w", 1.0)),
+                    }
                     copies.append(entry)
                 topic["images"] = copies
             (job / "data.json").write_text(

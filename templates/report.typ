@@ -118,16 +118,12 @@
         #text(size: 9.5pt, fill: body-ink, t.at("summary", default: ""))
       ]
     ]
-    // 这个话题自己的图（最多几张由配置决定）
-    // 竖图不能把整行拉太长：单图 200pt、并排 96pt，等比缩进去居中
+    // 这个话题自己的图：尺寸由 imaging.plan_image 算好（按像素比定宽、太长的已切段横排），
+    // 这里只管一张一张摆、居中、按 w 的比例铺开——不再按固定高度摆，免得小图糊成大图撑高
     #let pics = t.at("images", default: ())
-    // 长图（文字截图一类的超高图）要独占整行：挤在两列里字只有一半大小，手机上根本看不清
-    #let wides = pics.filter(p => p.at("wide", default: false))
-    #let normals = pics.filter(p => not p.at("wide", default: false))
     #if pics.len() > 0 [
       #block(above: 7pt, below: 0pt)[
-        // 先一张张铺满整行地排长图
-        #for p in wides [
+        #for p in pics [
           #block(
             width: 100%,
             fill: rgb("#fbfcfe"),
@@ -135,35 +131,13 @@
             inset: 4pt,
             stroke: 0.5pt + hair,
           )[
-            #image(p.at("path"), width: 100%, height: auto, fit: "contain")
+            #align(center)[
+              #image(p.at("path"), width: p.at("w", default: 1.0) * 100%)
+            ]
             #v(2pt)
             #text(size: 7pt, fill: faint, p.at("caption", default: ""))
           ]
-          #v(3pt)
-        ]
-        // 其余小图照旧两列排
-        #if normals.len() > 0 [
-          #grid(
-            columns: if normals.len() == 1 { (1fr,) } else { (1fr, 1fr) },
-            gutter: 6pt,
-            row-gutter: 6pt,
-            ..normals.map(p => block(
-              width: 100%,
-              fill: rgb("#fbfcfe"),
-              radius: 4pt,
-              inset: 4pt,
-              stroke: 0.5pt + hair,
-            )[
-              #image(
-                p.at("path"),
-                width: 100%,
-                height: if normals.len() == 1 { 200pt } else { 96pt },
-                fit: "contain",
-              )
-              #v(2pt)
-              #text(size: 7pt, fill: faint, p.at("caption", default: ""))
-            ]),
-          )
+          #v(2pt)
         ]
       ]
     ]
