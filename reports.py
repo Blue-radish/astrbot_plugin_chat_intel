@@ -354,11 +354,17 @@ def resolve(state: dict, umo: str, record: dict, stored: bool = True) -> dict:
 
 
 def mark_delivered(state: dict, umo: str, report_id: str) -> bool:
-    """图片真的发出去了。只动投递位，不碰正文是否可读。"""
+    """图片真的发出去了。只动投递位，不碰正文是否可读。
+
+    写之前先过 `_facts()`：老数据只有 status，直接写 delivered 会把「正文不可读」
+    这个事实覆盖掉，于是图发出去之后索引又宣称这份能讨论。
+    """
     items = entries(state, umo)
     hit = False
     for entry in items:
         if entry.get("id") == report_id:
+            stored, _delivered = _facts(entry)
+            entry["stored"] = bool(stored)
             entry["delivered"] = True
             entry["send_error"] = ""
             hit = True
@@ -373,8 +379,11 @@ def mark_send_failed(state: dict, umo: str, report_id: str, reason: str = "") ->
     hit = False
     for entry in items:
         if entry.get("id") == report_id:
-            # 之前发成功过就保持「已投递」：用户手里确实有这份，重发失败不该改历史
-            entry["delivered"] = bool(entry.get("delivered"))
+            # 之前发成功过就保持「已投递」：用户手里确实有这份，重发失败不该改历史。
+            # 老数据的 delivered 藏在 status 里，得先让 _facts() 还原出来再写。
+            stored, delivered = _facts(entry)
+            entry["stored"] = bool(stored)
+            entry["delivered"] = bool(delivered)
             entry["send_error"] = str(reason or "发送失败")
             hit = True
     if hit:
@@ -382,10 +391,17 @@ def mark_send_failed(state: dict, umo: str, report_id: str, reason: str = "") ->
     return hit
 
 
-def mark_failed(state: dict, umo: str, *, gid: str = "", label: str = "", reason: str = "") -> None:
+def settle(state: dict, umo: str, *, gid: str = "", label: str = "", reason: str = "") -> int:
+    """把还在「生成中」的占位收尾，返回收尾了几条。
+
+    成功由 `resolve()` 换掉，其余结局（一条都没命中、抛异常、被取消、卸载）都走这里。
+    以前只有一个 `mark_failed`，而且找到第一条就 break：整批（全部群）出错时，
+    剩下的目标会永远停在「正在生成」，用户问「跑完了吗」永远被告知还在跑。
+    所以这里不加 break，gid 为空就表示这个会话里在跑的全算。
+    """
     items = entries(state, umo)
-    for index in range(len(items) - 1, -1, -1):
-        entry = items[index]
+    hit = 0
+    for entry in items:
         if _phase(entry) != "generating":
             continue
         if gid and entry.get("gid") not in ("", gid):
@@ -394,8 +410,23 @@ def mark_failed(state: dict, umo: str, *, gid: str = "", label: str = "", reason
             continue
         entry["phase"] = "failed"
         entry["fail_reason"] = str(reason or "")
-        break
-    _store(state, umo, items)
+        hit += 1
+    if hit:
+        _store(state, umo, items)
+    return hit
+
+
+def settle_all(state: dict, *, reason: str = "") -> int:
+    """所有会话里还在「生成中」的占位一起收尾（卸载 / 重载时用）。"""
+    conversations = state.get("conversations")
+    if not isinstance(conversations, dict):
+        return 0
+    return sum(settle(state, umo, reason=reason) for umo in list(conversations.keys()))
+
+
+def mark_failed(state: dict, umo: str, *, gid: str = "", label: str = "", reason: str = "") -> None:
+    """兼容旧调用：等同 `settle()`。"""
+    settle(state, umo, gid=gid, label=label, reason=reason)
 
 
 def set_focus(state: dict, umo: str, report_id: str, topic_no: int = 0) -> None:

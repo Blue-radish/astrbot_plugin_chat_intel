@@ -170,7 +170,7 @@ class DigestRequest:
     gid: str | None = None  # None = 所有群
 
 
-@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.14")
+@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.15")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -663,22 +663,36 @@ class TechDigestPlugin(Star):
             return "全部群"
         return self.group_name_map.get(req.gid) or f"群 {req.gid}"
 
-    async def _submit_digest(self, req: DigestRequest) -> tuple[bool, str]:
-        """两个入口共用的提交：登记占位 → 抢执行位/排队 → 后台跑。
+    def _submit_targets(self, req: DigestRequest) -> list[tuple[str, str]]:
+        """这次请求会产出的报告目标：单群一条，「全部群」则每个群各一条。
 
-        返回 (是否真的开始跑了, 回给用户的话)。两个入口以前对「占位登记」处理不一致，
-        自然语言那条根本没记，于是用户回头问「跑完了吗」查不到正在跑的那份。
+        占位一定要带真实群号：报告是按群号保存的，占位若写个空群号（或「全部群」），
+        各群自己的成功结果认领不到它，索引里就会留一条永远跑不完的「正在生成」。
+        """
+        if req.gid is not None:
+            gids = [req.gid]
+        else:
+            gids = list(self.group_ids)
+        return [(gid, self.group_name_map.get(gid) or f"群 {gid}") for gid in gids]
+
+    async def _submit_digest(self, req: DigestRequest) -> tuple[bool, str]:
+        """两个入口共用的提交：抢执行位/排队 → 登记占位 → 后台跑。
+
+        返回 (是否真的开始跑了, 回给用户的话)。
+        **先判断受理、再登记**：以前反过来，队列满被拒时索引里会留下一条永远跑不完的
+        「正在生成」，用户问「跑完了吗」就被骗；两个入口以前对占位处理也不一致，
+        自然语言那条根本没记，于是回头问也查不到。
         """
         target = self._digest_target(req)
-        # 记下「这个会话在等哪份报告」：用户回头问「跑完了吗」才有依据
-        reports.mark_generating(
-            self.state, req.umo, gid=req.gid or "", group=target, label=req.label
-        )
-        self._save_state()
-        if not self._claim():
-            if self._enqueue(req):
-                return False, "上一份还在生成，这份已经排队，跑完接着发。"
+        started = self._claim()
+        if not started and not self._enqueue(req):
             return False, f"已经在跑一份、后面还排着 {QUEUE_MAX} 份了，等它们跑完再叫我。"
+        # 记下「这个会话在等哪几份报告」：用户回头问「跑完了吗」才有依据
+        for gid, name in self._submit_targets(req):
+            reports.mark_generating(self.state, req.umo, gid=gid, group=name, label=req.label)
+        self._save_state()
+        if not started:
+            return False, "上一份还在生成，这份已经排队，跑完接着发。"
         logger.info(
             f"[{PLUGIN_NAME}] 已提交生成：范围={req.label} 群={target} "
             f"增量={req.incremental}"
@@ -747,10 +761,10 @@ class TechDigestPlugin(Star):
                 # 卸载/重载把任务掐了：占位不能永远停在「正在生成」，否则用户问「跑完了吗」
                 # 会一直被告知还在跑。
                 if request is not None:
-                    reports.mark_failed(
+                    # 「全部群」的 request.gid 是 None，要按会话把所有在跑的占位都收尾
+                    reports.settle(
                         self.state,
                         request.umo,
-                        gid=request.gid or "",
                         label=request.label,
                         reason="任务被取消（插件卸载或重载）",
                     )
@@ -2588,6 +2602,11 @@ class TechDigestPlugin(Star):
             except (asyncio.CancelledError, Exception):
                 pass
         self._tasks.clear()
+        # 排队还没开跑的请求永远不会跑了：清队列，并把所有「正在生成」的占位收尾，
+        # 否则下次启动后用户问「跑完了吗」还在等一份根本不存在的工作
+        self._queue.clear()
+        if reports.settle_all(self.state, reason="插件卸载，任务已取消"):
+            self._save_state()
         self._task = None
         self._running = False
 
@@ -3216,6 +3235,9 @@ class TechDigestPlugin(Star):
             for _gid, path, info, is_error in results:
                 if path is None:
                     logger.info(f"[{PLUGIN_NAME}] 跳过：{info}")
+                    # 这一群没产出报告：占位得收尾，否则永远停在「正在生成」
+                    if reports.settle(self.state, umo, gid=_gid, label=label, reason=info):
+                        self._save_state()
                     if is_error:
                         await self._send_text(umo, f"出错了：{info}")
                     elif announce:
@@ -3226,7 +3248,9 @@ class TechDigestPlugin(Star):
                 await asyncio.sleep(1)
         except Exception as e:
             logger.error(f"[{PLUGIN_NAME}] 生成流程异常: {e}", exc_info=True)
-            reports.mark_failed(self.state, umo, reason=str(e)[:120])
+            # 整批一起收尾：一个群炸了，别的群那几条占位也不能留在「正在生成」
+            if reports.settle(self.state, umo, label=label, reason=str(e)[:120]):
+                self._save_state()
             await self._send_text(umo, f"生成失败：{e}")
 
     def _migrate_legacy_config(self) -> None:
@@ -3326,8 +3350,9 @@ class TechDigestPlugin(Star):
         cache = self.state.get("images")
         if not isinstance(cache, dict) or not cache:
             return 0
-        # 缓存键是「兴趣指纹:文件名」，alive 里只有文件名，比对时要去掉前缀
-        stale = [k for k in cache if str(k).split(":", 1)[-1] not in alive]
+        # 缓存键是「兴趣指纹:话题指纹:文件名」，alive 里只有文件名，比对时要切掉前缀。
+        # 必须从**最后一个**冒号切：split(":", 1) 会留下「话题指纹:文件名」，永远匹配不上
+        stale = [k for k in cache if str(k).rsplit(":", 1)[-1] not in alive]
         for key in stale:
             cache.pop(key, None)
         return len(stale)
