@@ -177,7 +177,7 @@ class DigestRequest:
     again: bool = False  # 用户要求「重跑」：忽略增量位，把这段时间整段重算
 
 
-@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.17")
+@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.18")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -238,7 +238,9 @@ class TechDigestPlugin(Star):
         self._migrate_legacy_config()
 
         self._task: asyncio.Task | None = None      # 定时器
-        self._tasks: set[asyncio.Task] = set()      # 在跑的后台任务（卸载时要一起收）
+        self._tasks: set[asyncio.Task] = set()
+        self._current_req: "DigestRequest | None" = None  # 正在跑的那份请求
+        self._current_task: asyncio.Task | None = None  # 包着它跑的后台任务      # 在跑的后台任务（卸载时要一起收）
         self._last_run_date: str | None = None
         self._running = False
 
@@ -612,11 +614,62 @@ class TechDigestPlugin(Star):
             logger.warning(f"[{PLUGIN_NAME}] 文本发送失败: {e}")
 
 
+    async def cancel_digest(self, umo: str) -> str:
+        """叫停这个会话还没跑完的生成：在跑的那份掐掉，排队的清空。
+
+        只动这个会话自己的请求：定时档（没有请求对象）和别的会话都不碰。
+        占位统一收成「已取消」——不是「生成失败」，用户自己叫停的不算失败。
+        """
+        dropped = 0
+        keep = deque(maxlen=self._queue.maxlen or QUEUE_MAX)
+        while self._queue:
+            req = self._queue.popleft()
+            if req is not None and req.umo == umo:
+                dropped += 1
+            else:
+                keep.append(req)
+        self._queue = keep
+
+        running = getattr(self, "_current_req", None)
+        task = getattr(self, "_current_task", None)
+        stop_running = (
+            running is not None
+            and running.umo == umo
+            and task is not None
+            and not task.done()
+        )
+        if stop_running:
+            task.cancel()
+
+            def _release(_task) -> None:
+                # 任务要是还没被调度起来就被取消，它的 finally 永远不会跑，
+                # 执行位就一直占着——之后所有提交只能排队到重启。
+                self._running = False
+                self._current_req = None
+                self._current_task = None
+
+            task.add_done_callback(_release)
+        settled = reports.settle(self.state, umo, reason="已取消（用户叫停）")
+        if stop_running or dropped or settled:
+            self._save_state()
+        if stop_running:
+            logger.info(f"[{PLUGIN_NAME}] 用户叫停：在跑的那份已取消，清了 {dropped} 份排队")
+        if stop_running and dropped:
+            return f"已取消：在跑的 1 份掐掉，排队的 {dropped} 份清掉"
+        if stop_running:
+            return "已取消：在跑的那份已经掐掉"
+        if dropped:
+            return f"已取消：排队的 {dropped} 份清掉"
+        return "现在没有在跑或排队的生成"
+
     async def _handle_intent(self, event: AstrMessageEvent, intent) -> None:
         """按意图分流：状态 / 重发 / 重跑 / 总结。"""
         text = (event.message_str or "").strip()
         umo = event.unified_msg_origin
 
+        if intent.kind == "cancel":
+            await self._send_text(umo, await self.cancel_digest(umo))
+            return
         if intent.kind == "status":
             await self._send_text(umo, "\n".join(await self._status_lines()))
             return
@@ -756,8 +809,9 @@ class TechDigestPlugin(Star):
         )
         # 生成可能要好几分钟，先立刻回话，图由后台任务直接发到聊天里。
         # 执行位已经在这行之前同步占上了，所以连点两次也不会同时起两份。
+        self._current_req = req
         try:
-            self._spawn(self._execute(req))
+            self._current_task = self._spawn(self._execute(req))
         except Exception:
             self._running = False
             raise
@@ -799,6 +853,8 @@ class TechDigestPlugin(Star):
         request=None 表示定时档。
         """
         while True:
+            # 记下「现在在跑哪一份」：用户叫停时要靠它判断该不该掐（定时档是 None，不掐）
+            self._current_req = request
             try:
                 if request is None:
                     await self._run_daily_once()
@@ -831,6 +887,7 @@ class TechDigestPlugin(Star):
                 logger.error(f"[{PLUGIN_NAME}] 生成任务失败: {e}", exc_info=True)
             finally:
                 self._running = False
+                self._current_req = None
             if not self._queue:
                 return
             request = self._queue.popleft()
@@ -921,7 +978,7 @@ class TechDigestPlugin(Star):
             # 这里放行，但要明确告诉模型：涉及群聊内容就调工具，别自己编
             if self._tool_allowed(event) and self.group_ids:
                 hint = (
-                    "\n\n[群聊情报工具] 你手上有三个工具，按用户想要的东西选：\n"
+                    "\n\n[群聊情报工具] 你手上有四个工具，按用户想要的东西选：\n"
                     "1) 用户要**新的一份**总结/日报/情报 → 调用 group_digest"
                     "（when=时间，group=群名片段，都留空表示只看没看过的全部群）。"
                     "报告图由这个工具自己发出去，调用后不要再输出文字。\n"
@@ -930,7 +987,9 @@ class TechDigestPlugin(Star):
                     "query_group_records。\n"
                     "3) 用户要**查证原始消息**（“他原话怎么说的”“后来有人验证了吗”“是不是实测”）→ "
                     "调用 query_group_records，按时间、关键词或消息引用查，并带上前后文；从报告里拿到的引用，把 report_id 一起传，群和时间范围会自动取。\n"
-                    "4) 用户**重复问刚答过的事**（“他原话怎么说的”“你刚才说的那个呢”）→ "
+                    "4) 用户要**叫停还没跑完的生成**（“取消”“别跑了”“停下”）→ 调用 cancel_digest，"
+                    "它会掐掉在跑的那份并清空排队；已经发出去的图不受影响。\n"
+                    "5) 用户**重复问刚答过的事**（“他原话怎么说的”“你刚才说的那个呢”）→ "
                     "照样要**重新调一次工具**再答，别因为上一轮已经说过就不查了。"
                     "绝对不要用“（我把原话念给你）”“（以下是原话）”这类占位句代替内容："
                     "要么给出带时间和人的原话，要么明说查不到。\n"
@@ -2750,6 +2809,23 @@ class TechDigestPlugin(Star):
         # 图也由本工具自己发：模型不用再说「好的我帮你生成」
         event.set_extra("chat_intel_tool_sent", True)
         return "回执已由插件发给用户，报告图也会自己发；你不要再输出任何文字。"
+
+    @filter.llm_tool(name="cancel_digest")
+    async def tool_cancel_digest(self, event: AstrMessageEvent) -> str:
+        """叫停还没跑完的群聊报告生成。
+
+        用户说「取消」「别跑了」「停下」「不看了」「算了不用总结了」时调用。
+        只会停掉正在生成的那一份和排队的那些；已经发出去的图和已生成的报告不受影响。
+        用户不是在叫停（比如「取消订单」「取消订阅」这类别的事）时不要调用。
+
+        Args:
+            （无参数）
+        """
+        if not self._tool_allowed(event):
+            return "这个工具只能在私聊里由主人使用；群里不会发任何报告。"
+        message = await self.cancel_digest(event.unified_msg_origin)
+        await self._send_text(event.unified_msg_origin, message)
+        return "已经回复用户了，不要再输出文字。"
 
     # ------------------------------------------------------------------ 读取已有报告
     def _format_topic(self, topic: dict, detailed: bool = False, report_id: str = "") -> str:

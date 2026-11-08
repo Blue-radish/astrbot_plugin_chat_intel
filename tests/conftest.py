@@ -78,6 +78,8 @@ def make_plugin(**attrs):
     p.keep_days = attrs.pop("keep_days", 7)
     p._running = attrs.pop("_running", False)
     p._tasks = attrs.pop("_tasks", set())
+    p._current_req = attrs.pop("_current_req", None)
+    p._current_task = attrs.pop("_current_task", None)
     from collections import deque
     p._queue = attrs.pop("_queue", deque(maxlen=2))
     p._llm_blocked = attrs.pop("_llm_blocked", 0)

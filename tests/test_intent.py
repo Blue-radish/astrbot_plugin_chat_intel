@@ -43,3 +43,25 @@ def test_digest_natural_phrasings():
 
 def test_unrelated_text():
     assert detect_intent("今天天气怎么样") is None
+
+# ---------------------------------------------------------------- 取消
+def test_cancel_with_strong_anchor():
+    got = detect_intent("群聊情报取消")
+    assert got is not None and got.kind == "cancel"
+
+
+def test_cancel_variants():
+    for text in ("群聊情报别跑了", "日报停下", "情报不看了"):
+        got = detect_intent(text)
+        assert got is not None and got.kind == "cancel", text
+
+
+def test_bare_cancel_does_not_fire():
+    """「取消」两个字满世界都有（取消订阅、取消订单），没有指向词不许抢话。"""
+    assert detect_intent("取消") is None
+    assert detect_intent("帮我取消一下这个订单") is None
+
+
+def test_cancel_beats_digest_in_same_sentence():
+    got = detect_intent("群聊情报取消刚才那份总结")
+    assert got is not None and got.kind == "cancel"
