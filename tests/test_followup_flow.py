@@ -407,6 +407,41 @@ def test_manual_send_failure_keeps_generated_status(tmp_path):
     assert [reports.status_of(e) for e in reports.entries(p.state, UMO)] == ["generated"]
 
 
+def test_delivery_moves_focus_to_the_new_report(tmp_path):
+    """刚收到的那份才是「第二条」的指代对象；要聊旧的得显式引用。"""
+    p = make(tmp_path)
+    hold = build_report(
+        tmp_path, "oldOne", [], "上午", ["旧话题"], time.time() - 7200, time.time() - 3600
+    )
+    reports.resolve(p.state, UMO, hold)
+    reports.set_focus(p.state, UMO, "oldOne", 2)
+
+    fresh = build_report(
+        tmp_path, "newOne", [], "刚才", ["新话题"], time.time() - 600, time.time()
+    )
+    reports.resolve(p.state, UMO, fresh)
+
+    asyncio.run(p._deliver_report(UMO, tmp_path / "reports" / "newOne.png"))
+
+    focus = reports.get_focus(p.state, UMO)
+    assert focus.get("report_id") == "newOne", "焦点没跟着新报告走"
+    assert focus.get("topic_no") == 0, "整份新报告，不指定话题"
+    assert reports.status_of(reports.entries(p.state, UMO)[-1]) == "delivered"
+
+
+def test_failed_delivery_keeps_the_old_focus(tmp_path):
+    """没发出去就别抢焦点：用户手里还是上一份。"""
+    p = make(tmp_path)
+    p.context = Ctx(ok=False)
+    reports.set_focus(p.state, UMO, "oldOne", 2)
+
+    asyncio.run(p._deliver_report(UMO, tmp_path / "reports" / "newOne.png"))
+
+    focus = reports.get_focus(p.state, UMO)
+    assert focus.get("report_id") == "oldOne"
+    assert focus.get("topic_no") == 2
+
+
 def test_expired_evidence_is_stated_in_the_report(tmp_path):
     p = make(tmp_path)
     record = build_report(

@@ -2449,6 +2449,9 @@ class TechDigestPlugin(Star):
         else:
             logger.info(f"[{PLUGIN_NAME}] 已投递 {path.name} -> {umo}")
             reports.mark_delivered(self.state, umo, rid)
+            # 焦点跟着最新投递走：用户刚收到这份，下一句「第二条」「他原话」指的就是它。
+            # 想接着聊旧报告就显式引用旧报告（ID 或话题），别靠含糊指代。
+            reports.set_focus(self.state, umo, rid, 0)
         self._save_state()
         return ok is not False
 
