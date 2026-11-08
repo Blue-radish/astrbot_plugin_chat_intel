@@ -153,7 +153,7 @@ TECH_HINTS = (
 
 SYSTEM_PROMPT = """你在给群友写一份私人情报简报。文字克制、具体、可执行。"""
 
-@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.9")
+@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.10")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -782,6 +782,10 @@ class TechDigestPlugin(Star):
                     "query_group_records。\n"
                     "3) 用户要**查证原始消息**（“他原话怎么说的”“后来有人验证了吗”“是不是实测”）→ "
                     "调用 query_group_records，按时间、关键词或消息引用查，并带上前后文；从报告里拿到的引用，把 report_id 一起传，群和时间范围会自动取。\n"
+                    "4) 用户**重复问刚答过的事**（“他原话怎么说的”“你刚才说的那个呢”）→ "
+                    "照样要**重新调一次工具**再答，别因为上一轮已经说过就不查了。"
+                    "绝对不要用“（我把原话念给你）”“（以下是原话）”这类占位句代替内容："
+                    "要么给出带时间和人的原话，要么明说查不到。\n"
                     "回答时分清三件事：报告里的概括、群友的原始说法（带时间和人）、"
                     "你自己的分析。查不到就直说是记录过期、采集有缺口或那一时段没有相关内容，"
                     "不要用推测填补。除 group_digest 外，其他工具执行完都要正常回答。"
@@ -2676,6 +2680,11 @@ class TechDigestPlugin(Star):
                 )
             else:
                 lines.append("  这份报告没有记下来源引用，只能看概括。")
+        else:
+            # 概览也要报一句引用数：不然模型得逐话题重读一遍才知道哪条有原文
+            refs = [str(r) for r in (topic.get("refs") or []) if r]
+            if refs:
+                lines.append(f"  来源引用 {len(refs)} 条")
         return "\n".join(lines)
 
     def _refs_status(self, record: dict) -> str:
@@ -2750,12 +2759,20 @@ class TechDigestPlugin(Star):
                     head + [f"这份报告只有 {len(topics)} 个话题，没有第 {topic_no} 个。"]
                 )
             return "\n".join(head + ["", self._format_topic(picked[0], detailed=True, report_id=rid)])
+        all_refs = [str(r) for t in topics for r in (t.get("refs") or []) if r]
         lines = head + ["", f"共 {len(topics)} 个话题："]
         lines += [self._format_topic(t, detailed=False) for t in topics]
         lines.append("")
         lines.append(
             f"要看某个话题的来源消息，用 get_group_report(report_id=\"{rid}\", topic_no=N)；"
             "要查后续或原话，用 query_group_records。"
+            + (
+                f"想把全部原话一次取回来，就带上 report_id=\"{rid}\"，"
+                f"msg_ids 传成所有话题的引用（共 {len(all_refs)} 条，逗号分隔），一次调用就能拿全，"
+                "别一个话题一个话题地试。"
+                if all_refs
+                else ""
+            )
         )
         return "\n".join(lines)
 
