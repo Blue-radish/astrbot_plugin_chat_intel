@@ -22,8 +22,8 @@ def test_run_daily_once_covers_24h_and_is_not_incremental():
     p, _ = make_plugin()
     seen = []
 
-    async def fake_generate_all(since, until, label, incremental, only_gid=None):
-        seen.append((since, until, label, incremental, only_gid))
+    async def fake_generate_all(since, until, label, incremental, only_gid=None, umo=""):
+        seen.append((since, until, label, incremental, only_gid, umo))
         return [("1", None, "某群：没有消息", False)]
 
     pushed = []
@@ -35,7 +35,7 @@ def test_run_daily_once_covers_24h_and_is_not_incremental():
     p._push = fake_push
     before = time.time()
     asyncio.run(p._run_daily_once())
-    since, until, label, incremental, only_gid = seen[0]
+    since, until, label, incremental, only_gid, umo = seen[0]
     assert incremental is False, "定时档不能是增量，否则漏跑一次就永远缺一块"
     assert only_gid is None
     assert abs((until - since) - 86400) < 1

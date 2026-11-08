@@ -80,6 +80,8 @@ def build_record(
     failed_chunks: list[int] | None = None,
     chunk_total: int = 1,
     truncated: bool = False,
+    requested_since=None,
+    incremental: bool = False,
 ) -> dict:
     """把一次生成的业务数据整理成可长期读取的报告记录。"""
     out_topics: list[dict] = []
@@ -113,7 +115,14 @@ def build_record(
         "gid": str(gid or ""),
         "group": str(group or ""),
         "platform": str(platform or ""),
-        "range": {"label": str(label or ""), "since": int(since or 0), "until": int(until or 0)},
+        "range": {
+            "label": str(label or ""),
+            # since 是**实际**用来取数的起点（增量时可能被游标往前推），请求值另存
+            "since": int(since or 0),
+            "until": int(until or 0),
+            "requested_since": int(requested_since if requested_since is not None else (since or 0)),
+            "incremental": bool(incremental),
+        },
         "covered": {
             "first": first,
             "last": last,
@@ -261,15 +270,22 @@ def mark_generating(state: dict, umo: str, *, gid: str, group: str, label: str, 
     return entry
 
 
-def resolve(state: dict, umo: str, record: dict, status: str = "generated") -> dict:
-    """生成好了：用真报告替换掉同群同范围的占位（没有占位就追加）。"""
+def resolve(
+    state: dict, umo: str, record: dict, status: str = "generated", stored: bool = True
+) -> dict:
+    """生成好了：用真报告替换掉同群同范围的占位（没有占位就追加）。
+
+    stored=False 表示正文 JSON 没写成功：图可能发出去了，但读不回来，
+    状态必须如实标成 unreadable，别让人以为还能讨论。
+    """
     entry = {
         "id": str(record.get("id") or ""),
         "gid": str(record.get("gid") or ""),
         "group": str(record.get("group") or ""),
         "label": str((record.get("range") or {}).get("label") or ""),
         "ts": int(record.get("generated_at") or time.time()),
-        "status": status,
+        "status": "unreadable" if not stored else status,
+        "reason": "" if stored else "正文存档失败，只能重发图、读不了内容",
         "topics": [str(topic.get("title") or "") for topic in record.get("topics") or []],
         "image": str(record.get("image") or ""),
         "incomplete": record.get("status") == "incomplete",
@@ -302,6 +318,21 @@ def mark_delivered(state: dict, umo: str, report_id: str) -> bool:
     return hit
 
 
+def mark_send_failed(state: dict, umo: str, report_id: str, reason: str = "") -> bool:
+    """生成好了但没发出去：保留 generated，别谎报 delivered。"""
+    items = entries(state, umo)
+    hit = False
+    for entry in items:
+        if entry.get("id") == report_id:
+            if entry.get("status") in ("generated", "delivered"):
+                entry["status"] = "generated"
+                entry["reason"] = reason or "发送失败"
+            hit = True
+    if hit:
+        _store(state, umo, items)
+    return hit
+
+
 def mark_failed(state: dict, umo: str, *, gid: str = "", label: str = "", reason: str = "") -> None:
     items = entries(state, umo)
     for index in range(len(items) - 1, -1, -1):
@@ -318,6 +349,22 @@ def mark_failed(state: dict, umo: str, *, gid: str = "", label: str = "", reason
     _store(state, umo, items)
 
 
+def set_focus(state: dict, umo: str, report_id: str, topic_no: int = 0) -> None:
+    """记下「现在在讨论哪份报告的哪个话题」，让下一轮省略 ID 时接得上。"""
+    if not umo or not report_id:
+        return
+    _conv(state, umo)["focus"] = {
+        "report_id": str(report_id),
+        "topic_no": int(topic_no or 0),
+        "ts": int(time.time()),
+    }
+
+
+def get_focus(state: dict, umo: str) -> dict:
+    focus = _conv(state, umo).get("focus")
+    return focus if isinstance(focus, dict) else {}
+
+
 def drop_expired(state: dict, report_dir) -> None:
     """文件被清理掉的索引条目标成 expired，别让模型以为还读得到。"""
     for umo, conv in (state.get("conversations") or {}).items():
@@ -331,13 +378,25 @@ def drop_expired(state: dict, report_dir) -> None:
             if path is None or not path.is_file():
                 entry["status"] = "expired"
                 entry["id"] = report_id  # 留着 id，回答时能说清是哪份过期了
+        focus = conv.get("focus")
+        if isinstance(focus, dict) and focus.get("report_id"):
+            focus_path = path_for(report_dir, str(focus["report_id"]))
+            if focus_path is None or not focus_path.is_file():
+                conv.pop("focus", None)
 
 
 def blurb(state: dict, umo: str, limit: int = INDEX_KEEP) -> str:
     """注入提示词的一小段：只说标题和定位信息，正文按需用工具读。"""
     items = [e for e in entries(state, umo) if e.get("status") != "expired"]
+    focus_line = ""
+    focus = get_focus(state, umo)
+    if focus.get("report_id"):
+        focus_line = f"[正在讨论] 报告 {focus['report_id']}"
+        if focus.get("topic_no"):
+            focus_line += f" 第 {focus['topic_no']} 个话题"
+        focus_line += "；用户说「这条」「第二条」就是它，省略 ID 也先读它。\n"
     if not items:
-        return ""
+        return focus_line.rstrip()
     lines: list[str] = []
     for index, entry in enumerate(items[-limit:], 1):
         group = entry.get("group") or (f"群 {entry['gid']}" if entry.get("gid") else "（所有群）")
@@ -349,10 +408,14 @@ def blurb(state: dict, umo: str, limit: int = INDEX_KEEP) -> str:
         if status == "failed":
             lines.append(f"{index}) 生成失败：{group}｜{label}")
             continue
+        if status == "unreadable":
+            lines.append(f"{index}) 有图但正文没存下来（读不了）：{group}｜{label}")
+            continue
         topics = [t for t in (entry.get("topics") or []) if t]
         titles = "、".join(topics[:4])
         lines.append(
             f"{index}) 报告 ID={entry.get('id')}｜{group}｜{label}｜"
             f"{len(topics)} 个话题（{titles}）"
         )
-    return "[已有报告] " + "；".join(lines)
+    text = "[已有报告] " + "；".join(lines)
+    return (focus_line + text) if focus_line else text

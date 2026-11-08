@@ -32,6 +32,18 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_chat_intel"
 
+# 追问/查证类说法：出现这些就不许被「生成」拦截器劫走，交给模型挑读取工具。
+# 「日报第二条有什么依据」以前会命中 digest 动作词（有什么），于是又生成了一份新报告。
+RE_FOLLOWUP = re.compile(
+    r"第[一二三四五六七八九十百\d]+\s*[条个]|这条|那条|哪条|这个说法|那个说法|话题|依据|原话|引用|"
+    r"出处|来源|靠谱|可信|准确|解释|展开|具体点|后来|后续|验证|有人试过|实测|猜测|瞎编|"
+    r"什么意思|为什么这么说|结论"
+)
+QUERY_PAGE = 20            # 一次最多显示多少条命中
+QUERY_CTX_BEFORE = 1       # 命中消息往前带几条上下文
+QUERY_CTX_AFTER = 2        # 往后带几条（「后来呢」靠这个）
+QUERY_SCAN_LIMIT = 50000   # 查询扫描上限（和「总结最多吃多少条」是两件事）
+
 
 try:  # 插件以包形式被 AstrBot 加载时走相对导入
     from . import imaging  # 长图切段横排（出图脚本共用同一实现）
@@ -141,7 +153,7 @@ TECH_HINTS = (
 
 SYSTEM_PROMPT = """你在给群友写一份私人情报简报。文字克制、具体、可执行。"""
 
-@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.8")
+@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.9")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -745,6 +757,11 @@ class TechDigestPlugin(Star):
         intent = detect_intent(text)
         if not self._should_act(text, intent):
             return
+        if RE_FOLLOWUP.search(text):
+            # 「日报第二条有什么依据」「他原话怎么说的」是在追问已经发过的报告，
+            # 不是要新报告：放给模型去选 get_group_report / query_group_records。
+            logger.info(f"[{PLUGIN_NAME}] 追问类请求，交给模型处理：「{text[:40]}」")
+            return
         event.stop_event()  # 模型这段就别开口了
         asyncio.create_task(self._handle_intent(event, intent))
 
@@ -764,7 +781,7 @@ class TechDigestPlugin(Star):
                     "调用 get_group_report 读正文，不要重新生成报告。需要原话时再调 "
                     "query_group_records。\n"
                     "3) 用户要**查证原始消息**（“他原话怎么说的”“后来有人验证了吗”“是不是实测”）→ "
-                    "调用 query_group_records，按时间、关键词或消息 id 查，并带上前后文。\n"
+                    "调用 query_group_records，按时间、关键词或消息引用查，并带上前后文；从报告里拿到的引用，把 report_id 一起传，群和时间范围会自动取。\n"
                     "回答时分清三件事：报告里的概括、群友的原始说法（带时间和人）、"
                     "你自己的分析。查不到就直说是记录过期、采集有缺口或那一时段没有相关内容，"
                     "不要用推测填补。除 group_digest 外，其他工具执行完都要正常回答。"
@@ -935,7 +952,9 @@ class TechDigestPlugin(Star):
             # 只报前几条，避免刷屏；tag 自带定位信息（图片下载失败 / 取群名失败 / 异常 …）
             logger.warning(f"[{PLUGIN_NAME}] {tag}：{detail}", exc_info=exc)
 
-    def _load_records(self, gid: str, since: float, until: float) -> list[dict]:
+    def _load_records(
+        self, gid: str, since: float, until: float, limit: bool = True
+    ) -> list[dict]:
         out: list[dict] = []
         if not self.store_dir.exists():
             return out
@@ -962,18 +981,20 @@ class TechDigestPlugin(Star):
                 logger.debug(f"[{PLUGIN_NAME}] 读取 {path.name} 失败: {e}")
         out.sort(key=lambda r: int(r.get("t") or 0))
         out = self._dedupe_records(out)
-        if len(out) > self.max_messages:
+        if limit and len(out) > self.max_messages:
             out = out[-self.max_messages :]
         return out
 
-    def _merge_records(self, local: list[dict], history: list[dict]) -> list[dict]:
+    def _merge_records(
+        self, local: list[dict], history: list[dict], limit: bool = True
+    ) -> list[dict]:
         """本地记录 + 历史记录：按消息 id 去重（撞键合并图片）、按时间排序、留最新 N 条。
 
         顺序很重要：本地记录是最新的，历史记录是补回来的旧的；不排序直接截尾会把最新的丢掉。
         """
         merged = self._dedupe_records(list(local) + list(history))
         merged.sort(key=lambda r: int(r.get("t") or 0))
-        return merged[-self.max_messages :]
+        return merged[-self.max_messages :] if limit else merged
 
     @staticmethod
     def _dedupe_records(records: list[dict]) -> list[dict]:
@@ -2236,8 +2257,10 @@ class TechDigestPlugin(Star):
             group=group_name,
             platform=str(chat.platform or ""),
             label=label,
-            since=since,
+            since=real_since,
             until=until,
+            requested_since=since,
+            incremental=incremental,
             topics=topics,
             records=records,
             image_name=path.name,
@@ -2252,9 +2275,13 @@ class TechDigestPlugin(Star):
             chunk_total=len(chunks),
             truncated=len(records) >= self.max_messages,
         )
-        reports.save(self.reports_dir, record)
+        stored = reports.save(self.reports_dir, record) is not None
+        if not stored:
+            logger.warning(
+                f"[{PLUGIN_NAME}] {path.name} 的正文存档写失败：图能发，但之后读不回来"
+            )
         if umo:
-            reports.resolve(self.state, umo, record)
+            reports.resolve(self.state, umo, record, stored=stored)
 
         # 只有完整跑完才推进增量游标，否则漏掉的内容下一轮还能补回来
         if incremental and not incomplete:
@@ -2432,15 +2459,23 @@ class TechDigestPlugin(Star):
         后者一旦漏跑一次，那段就永远补不回来了。
         """
         since, until, label = self._daily_window(time.time())
+        umo = self.push_umo or ""
         logger.info(f"[{PLUGIN_NAME}] 定时范围：{label}（{datetime.fromtimestamp(since):%m-%d %H:%M} 起）")
-        results = await self.generate_all(since, until, label, False)
+        # 带上收件会话：定时报告也要进索引，否则「刚才那份」只能靠全局最新去猜
+        results = await self.generate_all(since, until, label, False, None, umo)
         for _gid, path, info, is_error in results:
             if path is None:
                 logger.info(f"[{PLUGIN_NAME}] 定时跳过：{info}")
                 if is_error:
                     await self._push_text(f"群聊情报出错：{info}")
                 continue
-            await self._push(path)
+            pushed = await self._push(path)
+            rid = reports.report_id_from_image(path.name)
+            if pushed:
+                reports.mark_delivered(self.state, umo, rid)
+            else:
+                reports.mark_send_failed(self.state, umo, rid, reason="定时推送失败")
+            self._save_state()
 
     @staticmethod
     def _daily_window(now: float) -> tuple[float, float, str]:
@@ -2615,7 +2650,7 @@ class TechDigestPlugin(Star):
         )
 
     # ------------------------------------------------------------------ 读取已有报告
-    def _format_topic(self, topic: dict, detailed: bool = False) -> str:
+    def _format_topic(self, topic: dict, detailed: bool = False, report_id: str = "") -> str:
         head = (
             f"话题 {topic.get('no')}｜{topic.get('title')}"
             f"｜{topic.get('time') or '时间未知'}｜{topic.get('count')} 条"
@@ -2632,21 +2667,60 @@ class TechDigestPlugin(Star):
                 lines.append(
                     f"  来源消息引用（共 {len(refs)} 条）：{shown}{' …' if len(refs) > 12 else ''}"
                 )
+                call = f'query_group_records(report_id="{report_id}", msg_ids="{refs[0]}")'
+                if not report_id:
+                    call = f'query_group_records(msg_ids="{refs[0]}")'
                 lines.append(
                     "  报告里只有引用、不含原文（原话以消息库为准）："
-                    f"要原话就调 query_group_records(msg_ids=\"{refs[0]}\")，"
-                    "要看前后文就按关键词或时间查。"
+                    f"要原话就调 {call}，群和时间范围会自动带上。"
                 )
             else:
                 lines.append("  这份报告没有记下来源引用，只能看概括。")
         return "\n".join(lines)
 
+    def _refs_status(self, record: dict) -> str:
+        """报告里的引用，现在还能在本地消息库里核对几条——过期就直说。"""
+        refs = {str(r) for topic in (record.get("topics") or []) for r in (topic.get("refs") or [])}
+        if not refs:
+            return "引用核对：这份报告没记来源引用。"
+        gid = str(record.get("gid") or "")
+        rng = record.get("range") or {}
+        covered = record.get("covered") or {}
+        marks = [
+            float(x)
+            for x in (rng.get("since"), rng.get("until"), covered.get("first"), covered.get("last"))
+            if x
+        ]
+        since = min(marks) if marks else 0.0
+        until = max(marks) if marks else time.time()
+        present: set[str] = set()
+        try:
+            for rec in self._load_records(gid, since, until, limit=False):
+                ref = reports.ref_of(rec)
+                if ref in refs:
+                    present.add(ref)
+        except Exception as e:
+            logger.debug(f"[{PLUGIN_NAME}] 引用核对失败: {e}")
+            return "引用核对：本地库读取失败，暂时无法核对原话。"
+        if len(present) == len(refs):
+            return f"引用核对：{len(refs)} 条引用都还能在本地消息库里查到原文。"
+        if not present:
+            return (
+                f"引用核对：{len(refs)} 条引用一条都查不到了（原文已过保留期 {self.keep_days} 天），"
+                "只能讨论报告里的概括，原话无法核对。"
+            )
+        return (
+            f"引用核对：{len(present)}/{len(refs)} 条还能查到原文，"
+            f"其余已过保留期或没采到（当前保留 {self.keep_days} 天）。"
+        )
+
     def _format_report(self, record: dict, topic_no: int = 0) -> str:
         topics = [t for t in (record.get("topics") or []) if isinstance(t, dict)]
         rng = record.get("range") or {}
         covered = record.get("covered") or {}
+        rid = str(record.get("id") or "")
         head = [
-            f"报告 {record.get('id')}",
+            f"报告 {rid}",
             f"群：{record.get('group') or '?'}（{record.get('gid') or '?'}）",
             f"范围：{rng.get('label') or '?'}｜实际覆盖 {covered.get('first_time') or '?'}"
             f" ~ {covered.get('last_time') or '?'}｜{record.get('msg_count')} 条消息",
@@ -2666,6 +2740,7 @@ class TechDigestPlugin(Star):
             head.append("注意：这个时段消息太多，只取了最近一批，更早的部分可能没覆盖")
         if record.get("headline"):
             head.append(f"总览：{record['headline']}")
+        head.append(self._refs_status(record))
         if not topics:
             return "\n".join(head + ["（这份报告里没有可用话题）"])
         if topic_no:
@@ -2674,32 +2749,38 @@ class TechDigestPlugin(Star):
                 return "\n".join(
                     head + [f"这份报告只有 {len(topics)} 个话题，没有第 {topic_no} 个。"]
                 )
-            return "\n".join(head + ["", self._format_topic(picked[0], detailed=True)])
+            return "\n".join(head + ["", self._format_topic(picked[0], detailed=True, report_id=rid)])
         lines = head + ["", f"共 {len(topics)} 个话题："]
         lines += [self._format_topic(t, detailed=False) for t in topics]
         lines.append("")
         lines.append(
-            "要看某个话题的来源消息，再用 get_group_report(topic_no=N)；"
+            f"要看某个话题的来源消息，用 get_group_report(report_id=\"{rid}\", topic_no=N)；"
             "要查后续或原话，用 query_group_records。"
         )
         return "\n".join(lines)
 
     def _pick_report(self, umo: str, report_id: str, gid: str) -> tuple[str, str]:
-        """选一份报告：显式 id > 会话里最近一份 > 这个群最近一份。"""
+        """选一份报告：显式 id > 指定群 > 当前讨论焦点 > 会话最近一份 > 全局最新。"""
         if report_id.strip():
             return reports.report_id_from_image(report_id.strip()), ""
         entries = [e for e in reports.entries(self.state, umo) if e.get("id")]
+        if gid:
+            for entry in reversed(entries):
+                if entry.get("gid") == gid and entry.get("status") != "expired":
+                    return str(entry.get("id") or ""), ""
+            found = reports.newest(self.reports_dir, gid, 1)
+            if found:
+                return found[0], ""
+            return "", f"群 {gid} 还没有保存过的报告（报告与原文都保留 {self.keep_days} 天）。"
+        focus = reports.get_focus(self.state, umo)
+        focused = str(focus.get("report_id") or "")
+        if focused and (
+            reports.load(self.reports_dir, focused) or reports.image_of(self.reports_dir, focused)
+        ):
+            return focused, ""
         usable = [e for e in entries if e.get("status") != "expired"]
-        if gid.strip():
-            hit, _ = self._match_group(gid)
-            if hit:
-                found = reports.newest(self.reports_dir, hit, 1)
-                if found:
-                    return found[0], ""
-                return "", f"群 {hit} 还没有保存过的报告（报告与原文都保留 {self.keep_days} 天）。"
         if usable:
-            last = usable[-1]
-            return str(last.get("id") or ""), ""
+            return str(usable[-1].get("id") or ""), ""
         found = reports.newest(self.reports_dir, None, 1)
         if found:
             return found[0], ""
@@ -2724,7 +2805,14 @@ class TechDigestPlugin(Star):
         if not self._tool_allowed(event):
             return "这个工具只能在私聊里由主人使用；群里不会输出任何报告内容。"
         umo = event.unified_msg_origin
-        rid, why = self._pick_report(umo, report_id, gid)
+        wanted_gid = ""
+        if gid.strip():
+            hit, _ = self._match_group(gid)
+            if not hit:
+                # 写错群名不许悄悄回退到别的群：那会答错对象
+                return f"没有「{gid}」这个群。现在配好的群：{await self._known_groups_text()}"
+            wanted_gid = hit
+        rid, why = self._pick_report(umo, report_id, wanted_gid)
         if not rid:
             return why
         record = reports.load(self.reports_dir, rid)
@@ -2738,37 +2826,114 @@ class TechDigestPlugin(Star):
                 f"找不到报告 {rid}：可能已过保留期（报告与原文都保留 {self.keep_days} 天），"
                 "或者这个 id 不对。"
             )
-        return self._format_report(record, int(topic_no or 0))
+        text = self._format_report(record, int(topic_no or 0))
+        # 记下讨论焦点：下一轮省略 ID 时接着聊这份，而不是跳回最新一份
+        reports.set_focus(self.state, umo, rid, int(topic_no or 0))
+        self._save_state()
+        return text
 
-    async def _records_for_query(self, gid: str, since: float, until: float) -> list[dict]:
-        records = self._load_records(gid, since, until) if self.use_local_store else []
+    async def _scan_records(self, gid: str, since: float, until: float) -> list[dict]:
+        """查询专用：先取全再匹配，不按「总结上限」截断。
+
+        总结时截断是合理的（模型吃不下那么多），但按引用找人时若先截断，
+        早于最近 max_messages 条的消息就永远查不到了。
+        """
+        records = (
+            self._load_records(gid, since, until, limit=False) if self.use_local_store else []
+        )
         if len(records) < 20:
-            history = await self._fetch_history(gid, since, until)
-            if history:
-                records = self._merge_records(records, history)
+            records = await self._merge_history(gid, since, until, records)
         records.sort(key=lambda r: int(r.get("t") or 0))
+        if len(records) > QUERY_SCAN_LIMIT:
+            records = records[-QUERY_SCAN_LIMIT:]
         return records
+
+    async def _merge_history(
+        self, gid: str, since: float, until: float, records: list[dict]
+    ) -> list[dict]:
+        """回平台补拉一段历史，和不截断地并进现有记录。"""
+        try:
+            history = await self._fetch_history(gid, since, until)
+        except Exception as e:
+            logger.warning(f"[{PLUGIN_NAME}] 查询补拉 {gid} 失败: {e}")
+            return records
+        if not history:
+            return records
+        return self._merge_records(records, history, limit=False)
+
+    @staticmethod
+    def _hit_kind(rec: dict, wanted: list[str], words: list[str]) -> bool:
+        if wanted:
+            ref = reports.ref_of(rec)
+            return str(rec.get("mid") or "") in wanted or bool(ref and ref in wanted)
+        if words:
+            text = str(rec.get("text") or "")
+            return any(word in text for word in words)
+        return False
+
+    async def _collect_hits(
+        self,
+        targets: list[str],
+        since: float,
+        until: float,
+        wanted: list[str],
+        words: list[str],
+        browse: bool = False,
+    ) -> tuple[list[tuple[str, list[dict], int]], int, list[int], bool]:
+        hits: list[tuple[str, list[dict], int]] = []
+        scanned = 0
+        covered: list[int] = []
+        truncated = False
+        for cid in targets:
+            try:
+                records = await self._scan_records(cid, since, until)
+            except Exception as e:
+                logger.warning(f"[{PLUGIN_NAME}] 查询 {cid} 记录失败: {e}")
+                continue
+            found = (
+                list(range(len(records)))
+                if browse
+                else [i for i, rec in enumerate(records) if self._hit_kind(rec, wanted, words)]
+            )
+            if wanted and not found:
+                # 报告里的引用可能早于本地留存：本地没命中就回平台补拉一次
+                merged = await self._merge_history(cid, since, until, records)
+                if len(merged) > len(records):
+                    records = merged
+                    found = [
+                        i for i, rec in enumerate(records) if self._hit_kind(rec, wanted, words)
+                    ]
+            scanned += len(records)
+            if len(records) >= QUERY_SCAN_LIMIT:
+                truncated = True
+            covered += [int(rec.get("t") or 0) for rec in records if rec.get("t")]
+            hits += [(cid, records, i) for i in found]
+        return hits, scanned, covered, truncated
 
     @filter.llm_tool(name="query_group_records")
     async def tool_query_records(
         self,
         event: AstrMessageEvent,
+        report_id: str = "",
+        msg_ids: str = "",
+        keyword: str = "",
         gid: str = "",
         when: str = "",
-        keyword: str = "",
-        msg_ids: str = "",
         offset: int = 0,
     ) -> str:
-        """查被监控群里的原始消息（带时间、发送者、消息 id），用来查证原话和后续。
+        """查被监控群里的原始消息（带时间、发送者、引用），用来查证原话和后续。
 
         适合「他原话怎么说的」「后来有人验证成功了吗」「这是实测还是猜测」「今天还有人讨论吗」。
-        命中消息会附带上一条和下一条作上下文；结果会说明覆盖范围、是否被截断、还有多少条没显示。
+        命中消息会带上一条和下一条作上下文：命中本身带编号，上下文标「·」，同一句不会重复出现；
+        结果会说明覆盖范围、是否被截断、还有多少条没显示。
+        从报告里看到引用时把 report_id 一起传进来，群和时间范围会自动取，不用自己算日期。
 
         Args:
-            gid(string): 群号或群名片段；留空表示所有被监控的群
-            when(string): 时间范围，直接用用户原话（今天/昨天/前天/最近3天/上周/2026-11-05）；留空表示最近 24 小时
+            report_id(string): 报告 ID（读报告时会给）；填了就用这份报告的群和时间范围
+            msg_ids(string): 消息引用（mid 或「发送者@时间」），逗号或空格分隔；填了就按引用精确取，忽略 keyword
             keyword(string): 关键词，空格分隔，命中任意一个就算
-            msg_ids(string): 消息 id，逗号或空格分隔；填了就按 id 精确取，忽略 keyword
+            gid(string): 群号或群名片段；有 report_id 时不用填，留空表示所有被监控的群
+            when(string): 时间范围，用用户原话（今天/昨天/前天/最近3天/本周/上周/2026-11-05）；有 report_id 时默认用它自己的范围；都没有则最近 24 小时
             offset(int): 从第几条命中开始显示（默认 0），用于继续读取
         """
         if not self._tool_allowed(event):
@@ -2778,76 +2943,123 @@ class TechDigestPlugin(Star):
         for _gid in self.group_ids:  # 预热群名，否则按名字匹配不到
             await self._group_name(_gid)
 
+        record = None
+        if report_id.strip():
+            record = reports.load(
+                self.reports_dir, reports.report_id_from_image(report_id.strip())
+            )
+            if record is None:
+                return (
+                    f"找不到报告 {report_id}（可能已过保留期），拿不到它的时间范围。"
+                    "可以直接用 when= 指定时间再查。"
+                )
+
         targets = list(self.group_ids)
-        if gid.strip():
+        if record is not None:
+            rid_gid = str(record.get("gid") or "")
+            if rid_gid in self.group_ids:
+                targets = [rid_gid]
+        elif gid.strip():
             hit, _ = self._match_group(gid)
             if not hit:
                 return f"没有「{gid}」这个群。现在配好的群：{await self._known_groups_text()}"
             targets = [hit]
 
-        if when.strip():
+        if record is not None and not when.strip():
+            rng = record.get("range") or {}
+            covered_range = record.get("covered") or {}
+            since = float(rng.get("since") or covered_range.get("first") or 0)
+            until = float(rng.get("until") or covered_range.get("last") or 0)
+            if covered_range.get("first"):
+                since = min(x for x in (since, float(covered_range["first"])) if x)
+            if covered_range.get("last"):
+                until = max(until, float(covered_range["last"]))
+            if not since or not until:
+                now = time.time()
+                since, until = now - 24 * 3600, now
+            label = f"报告 {record.get('id')} 的范围（{rng.get('label') or '未标注'}）"
+        elif when.strip():
             rng, _matched = self._match_range(when)
+            if rng is None:
+                return (
+                    f"看不懂「{when}」这个时间范围。现在只认：今天 / 昨天 / 前天 / 最近3天 / 本周 / "
+                    "上周 / 2026-11-05 / 11-05；要查更早的消息请直接说日期。"
+                )
+            since, until, label, _incremental = rng
         else:
             now = time.time()
-            rng = (now - 24 * 3600, now, "最近 24 小时", False)
-        since, until, label, _incremental = rng
+            since, until, label = now - 24 * 3600, now, "最近 24 小时"
 
         wanted = [x for x in re.split(r"[,\s，、]+", msg_ids.strip()) if x]
         words = [w for w in re.split(r"[\s，,]+", keyword.strip()) if w]
+        # 只给时间范围也放行：当成「这段时间都聊了什么」，按时间列最近一页
+        browse = not wanted and not words
 
-        hits: list[tuple[str, int, dict]] = []
-        scanned = 0
-        truncated = False
-        covered: list[int] = []
-        for cid in targets:
-            try:
-                records = await self._records_for_query(cid, since, until)
-            except Exception as e:
-                logger.warning(f"[{PLUGIN_NAME}] 查询 {cid} 记录失败: {e}")
-                continue
-            scanned += len(records)
-            if len(records) >= self.max_messages:
-                truncated = True
-            for index, rec in enumerate(records):
-                ts = int(rec.get("t") or 0)
-                if ts:
-                    covered.append(ts)
-                text = str(rec.get("text") or "")
-                if wanted:
-                    ref = reports.ref_of(rec)
-                    if str(rec.get("mid") or "") not in wanted and ref not in wanted:
-                        continue
-                elif words:
-                    if not any(w in text for w in words):
-                        continue
-                hits.append((cid, index, rec))
+        hits, scanned, covered, truncated = await self._collect_hits(
+            targets, since, until, wanted, words, browse
+        )
 
         if not hits:
-            scope = f"{label}" + (f"，群 {targets[0]}" if len(targets) == 1 else f"，{len(targets)} 个群")
+            scope = f"{label}" + (
+                f"，群 {targets[0]}" if len(targets) == 1 else f"，{len(targets)} 个群"
+            )
             note = ""
             if not scanned:
                 note = (
                     f"（这段时间没有取到任何记录：可能已过保留期——当前保留 {self.keep_days} 天，"
                     "也可能当时没采集到）"
                 )
-            elif words:
+            elif wanted:
+                note = (
+                    "（这些引用在本地库里和平台历史里都没找到：可能已过保留期，或当时没采到。"
+                    "别据此推断「他没说过」）"
+                )
+            else:
                 note = "（这些关键词在这段时间的记录里没有命中，不代表没聊过，只代表没有字面匹配）"
             return f"{scope}：没有找到符合条件的消息{note}"
 
-        start = max(0, int(offset or 0))
-        page = hits[start : start + 20]
+        if browse:
+            # 浏览模式：默认给最近的一页，offset 从末尾往前数
+            end = max(0, len(hits) - max(0, int(offset or 0)))
+            start = max(0, end - QUERY_PAGE)
+            page = hits[start:end]
+        else:
+            start = max(0, int(offset or 0))
+            page = hits[start : start + QUERY_PAGE]
         lines = [
             f"原始消息（{label}，{'全部群' if len(targets) > 1 else targets[0]}）"
-            f"：命中 {len(hits)} 条，显示第 {start + 1}–{start + len(page)} 条"
+            f"：{'共 ' + str(len(hits)) + ' 条，' if browse else '命中 ' + str(len(hits)) + ' 条，'}"
+            f"显示第 {start + 1}–{start + len(page)} 条"
         ]
         if covered:
             first = datetime.fromtimestamp(min(covered)).strftime("%m-%d %H:%M")
             last = datetime.fromtimestamp(max(covered)).strftime("%m-%d %H:%M")
             lines.append(f"本地覆盖：{first} ~ {last}，共扫过 {scanned} 条")
         if truncated:
-            lines.append("注意：单群只取最近一批记录，更早的部分可能没扫到")
+            lines.append(f"注意：单群只扫最近 {QUERY_SCAN_LIMIT} 条，更早的部分可能没扫到")
+        if browse:
+            lines.append("没给关键词，按时间顺序列出这段时间的消息")
+        else:
+            lines.append("带编号的是命中的消息，「·」是它前后的上下文")
         lines.append("")
-        for pos, (cid, index, rec) in enumerate(page, start + 1):
+        # 先把要打印的行规划出来：命中优先，上下文不吞掉命中（否则命中行会丢掉编号和 id）
+        num_of = {(cid, index): start + i + 1 for i, (cid, _records, index) in enumerate(page)}
+        rows: dict[tuple[str, int], tuple[bool, dict]] = {}
+        for cid, records, index in page:
+            if browse:
+                rows[(cid, index)] = (True, records[index])
+                continue
+            after = QUERY_CTX_AFTER if wanted else QUERY_CTX_BEFORE
+            lo = max(0, index - QUERY_CTX_BEFORE)
+            hi = min(len(records) - 1, index + after)
+            for j in range(lo, hi + 1):
+                is_hit = (cid, j) in num_of
+                if is_hit or (cid, j) not in rows:
+                    rows[(cid, j)] = (is_hit, records[j])
+        group_rank = {cid: i for i, cid in enumerate(targets)}
+        for key in sorted(rows, key=lambda k: (group_rank.get(k[0], 99), k[1])):
+            cid, j = key
+            is_hit, rec = rows[key]
             ts = int(rec.get("t") or 0)
             stamp = datetime.fromtimestamp(ts).strftime("%m-%d %H:%M") if ts else "--:--"
             name = sanitize_name(rec.get("name")) or str(rec.get("uid") or "?")
@@ -2855,15 +3067,28 @@ class TechDigestPlugin(Star):
             if rec.get("imgs") and "[图]" not in text:
                 text += " [图]"
             tag = f"群{cid}｜" if len(targets) > 1 else ""
-            lines.append(
-                f"{pos}. [{stamp}] {tag}{name}：{text}（id={reports.ref_of(rec) or '无'}）"
-            )
-        if len(hits) > start + len(page):
+            if is_hit:
+                pos = num_of.get((cid, j), "")
+                lines.append(
+                    f"{pos}. [{stamp}] {tag}{name}：{text}"
+                    f"（id={reports.ref_of(rec) or '无'}）"
+                )
+            else:
+                lines.append(f"   · [{stamp}] {name}：{text}")
+        if browse:
+            if start > 0:
+                lines.append("")
+                lines.append(
+                    f"这段更早还有 {start} 条，用 offset={int(offset or 0) + len(page)} 接着往前看。"
+                )
+        elif len(hits) > start + len(page):
             lines.append("")
             lines.append(
                 f"还有 {len(hits) - start - len(page)} 条，用 offset={start + len(page)} 继续读，"
                 "或换个更窄的关键词。"
             )
+        lines.append("")
+        lines.append("要看他后面还说了什么，把 when 往后挪（例如 when=最近3天）再查一次。")
         return "\n".join(lines)
 
     def _last_report_desc(self, gid: str) -> str:
@@ -2955,11 +3180,17 @@ class TechDigestPlugin(Star):
                         # 用户主动问的，即使没东西也得回一句，不能当没听见
                         await self.context.send_message(umo, MessageChain().message(info))
                     continue
-                await self.context.send_message(
+                delivered = await self.context.send_message(
                     umo, MessageChain([AstrImage.fromFileSystem(str(path))])
                 )
                 # 索引要跟真实投递结果对齐：生成出来了 ≠ 发出去了
-                reports.mark_delivered(self.state, umo, reports.report_id_from_image(path.name))
+                rid = reports.report_id_from_image(path.name)
+                if delivered is False:
+                    logger.warning(f"[{PLUGIN_NAME}] {rid} 发送接口返回失败，保留为未投递")
+                    reports.mark_send_failed(self.state, umo, rid, reason="发送接口返回失败")
+                else:
+                    reports.mark_delivered(self.state, umo, rid)
+                self._save_state()
                 await asyncio.sleep(1)
         except Exception as e:
             logger.error(f"[{PLUGIN_NAME}] 生成流程异常: {e}", exc_info=True)
@@ -3037,13 +3268,11 @@ class TechDigestPlugin(Star):
                 shutil.rmtree(day_dir, ignore_errors=True)
             except Exception:
                 pass
-        # 报告存档跟原文同寿：原文没了，「他原话怎么说的」就答不了，
-        # 留着报告也只会误导。每个群最新一份永远保留，免得刚生成就查不到。
-        protect: set[str] = set()
-        for gid in self.group_ids:
-            protect.update(reports.newest(self.reports_dir, gid, 1))
+        # 报告存档跟原文同寿：原文没了，「他原话怎么说的」就答不了，留着报告只会
+        # 指向一片空白。以前给「每组最新一份」开了永久保护，结果报告比原文活得久，
+        # 引用全部失效——现在两边一起过期。
         removed_reports, removed_report_imgs = reports.prune(
-            self.reports_dir, self.keep_days, protect
+            self.reports_dir, self.keep_days, set()
         )
         reports.drop_expired(self.state, self.reports_dir)
 
