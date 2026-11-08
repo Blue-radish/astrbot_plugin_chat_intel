@@ -47,6 +47,7 @@ def make_plugin(**attrs):
     p.render_ppi = attrs.pop("render_ppi", 72)
     p.font_dir = attrs.pop("font_dir", "")
     p.state = attrs.pop("state", {})
+    p.reports_dir = attrs.pop("reports_dir", "")
     p.owner_uids = set(attrs.pop("owner_uids", []))
     p.group_name_map = attrs.pop("group_name_map", {})
     p.silence_platforms = attrs.pop("silence_platforms", [])
