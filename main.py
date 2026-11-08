@@ -19,6 +19,7 @@ import shutil
 import tempfile
 import time
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -153,7 +154,23 @@ TECH_HINTS = (
 
 SYSTEM_PROMPT = """你在给群友写一份私人情报简报。文字克制、具体、可执行。"""
 
-@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.10")
+@dataclass(frozen=True)
+class DigestRequest:
+    """一份待生成的报告任务。
+
+    以前用八元组在入口、队列、执行器之间传来传去，加个参数就要靠下标对齐；
+    现在字段有名字，两个入口构造同一份东西，执行器只管拆。
+    """
+
+    umo: str
+    since: float
+    until: float
+    label: str
+    incremental: bool
+    gid: str | None = None  # None = 所有群
+
+
+@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.11")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -213,7 +230,6 @@ class TechDigestPlugin(Star):
         # 老配置的一次性迁移（必须在读状态之后：标记存在状态文件里）
         self._migrate_legacy_config()
 
-        self._transcript_cache: tuple[list[dict], str] = ([], "")
         self._task: asyncio.Task | None = None
         self._last_run_date: str | None = None
         self._running = False
@@ -562,13 +578,6 @@ class TechDigestPlugin(Star):
         except Exception as e:
             logger.warning(f"[{PLUGIN_NAME}] 文本发送失败: {e}")
 
-    async def _send_image(self, umo: str, path: Path) -> None:
-        try:
-            await self.context.send_message(
-                umo, MessageChain([AstrImage.fromFileSystem(str(path))])
-            )
-        except Exception as e:
-            logger.warning(f"[{PLUGIN_NAME}] 图片发送失败: {e}")
 
     async def _handle_intent(self, event: AstrMessageEvent, intent) -> None:
         """按意图分流：状态 / 重发 / 重跑 / 总结。"""
@@ -583,13 +592,33 @@ class TechDigestPlugin(Star):
             if latest is None:
                 await self._send_text(umo, "还没有生成过报告。")
             else:
-                await self._send_image(umo, latest)
+                await self._deliver_report(umo, latest)
             return
 
+        req, refuse = await self._parse_digest(umo, text, again=intent.kind == "rerun")
+        if req is None:
+            await self._send_text(umo, refuse)
+            return
+        logger.info(
+            f"[{PLUGIN_NAME}] 直通 {intent.kind}：范围={req.label} 增量={req.incremental} "
+            f"群={req.gid or '全部'} 命中「{intent.anchor}+{intent.action}」原文「{text}」"
+        )
+        _started, message = await self._submit_digest(req)
+        await self._send_text(umo, message)
+
+    # ------------------------------------------------------------------ 两个入口共用
+    async def _parse_digest(
+        self, umo: str, text: str, *, again: bool = False, named_group: str = ""
+    ) -> tuple[DigestRequest | None, str]:
+        """两个入口共用：把「什么时候、哪个群、要不要重跑」解析成一份请求。
+
+        解析不出来就返回 (None, 要说的话)——群名对不上时宁可拒绝，也不要退回
+        「全部群」白烧一遍额度。自然语言和工具调用以前各写一份，改一处漏一处。
+        """
         for gid in self.group_ids:
             await self._group_name(gid)  # 预热群名，否则按名字匹配不到群
         rng, gid, rest = self._resolve_request(text)
-        unknown_group = ""
+        unknown = ""
         if rest and self.smart_parse and len(rest) >= 2:
             hint = await self._llm_parse_args(rest)
             if hint:
@@ -601,37 +630,69 @@ class TechDigestPlugin(Star):
                 if group_hint and not gid:
                     gid, _ = self._match_group(group_hint)
                     if not gid:
-                        unknown_group = group_hint  # 模型听出了群名，但配置里没有这个群
+                        unknown = group_hint  # 模型听出了群名，但配置里没有这个群
         since, until, label, incremental = rng
-        if intent.kind == "rerun":
+        if again:
             incremental = False  # 重跑：忽略增量位，按范围重来
-        if not gid and not unknown_group and rest:
+        if named_group and not gid and not unknown:
+            unknown = named_group  # 工具入口拿到了明确的群名却没匹配上
+        if not gid and not unknown and rest:
             core = self._clean_text(rest)
             if self._looks_like_group(core):
-                unknown_group = core
-        if unknown_group:
+                unknown = core
+        if unknown:
             # 用户点名了某个群却对不上：不要退回「全部群」，那是白烧 token
-            await self._send_text(
-                umo,
-                f"没找到「{unknown_group}」这个群，这次就不生成了。\n"
-                f"现在配好的群：{await self._known_groups_text()}",
+            return None, (
+                f"没找到「{unknown}」这个群，这次就不生成了（免得白跑一遍浪费额度）。\n"
+                f"现在配好的群：{await self._known_groups_text()}"
             )
-            return
-        logger.info(
-            f"[{PLUGIN_NAME}] 直通 {intent.kind}：范围={label} 增量={incremental} "
-            f"群={gid or '全部'} 命中「{intent.anchor}+{intent.action}」原文「{text}」"
-        )
-        if not self._claim():
-            if self._enqueue(("digest", umo, since, until, label, incremental, gid, True)):
-                await self._send_text(umo, "上一份还在生成，这份先排队，跑完接着来。")
-            else:
-                await self._send_text(umo, f"已经在跑一份、后面还排着 {QUEUE_MAX} 份了，等它们跑完再叫我。")
-            return
-        await self._execute(
-            ("digest", umo, since, until, label, incremental, gid, True)
+        return (
+            DigestRequest(
+                umo=umo,
+                since=since,
+                until=until,
+                label=label,
+                incremental=incremental,
+                gid=gid,
+            ),
+            "",
         )
 
-    def _enqueue(self, request: tuple) -> bool:
+    def _digest_target(self, req: DigestRequest) -> str:
+        if req.gid is None:
+            return "全部群"
+        return self.group_name_map.get(req.gid) or f"群 {req.gid}"
+
+    async def _submit_digest(self, req: DigestRequest) -> tuple[bool, str]:
+        """两个入口共用的提交：登记占位 → 抢执行位/排队 → 后台跑。
+
+        返回 (是否真的开始跑了, 回给用户的话)。两个入口以前对「占位登记」处理不一致，
+        自然语言那条根本没记，于是用户回头问「跑完了吗」查不到正在跑的那份。
+        """
+        target = self._digest_target(req)
+        # 记下「这个会话在等哪份报告」：用户回头问「跑完了吗」才有依据
+        reports.mark_generating(
+            self.state, req.umo, gid=req.gid or "", group=target, label=req.label
+        )
+        self._save_state()
+        if not self._claim():
+            if self._enqueue(req):
+                return False, "上一份还在生成，这份已经排队，跑完接着发。"
+            return False, f"已经在跑一份、后面还排着 {QUEUE_MAX} 份了，等它们跑完再叫我。"
+        logger.info(
+            f"[{PLUGIN_NAME}] 已提交生成：范围={req.label} 群={target} "
+            f"增量={req.incremental}"
+        )
+        # 生成可能要好几分钟，先立刻回话，图由后台任务直接发到聊天里。
+        # 执行位已经在这行之前同步占上了，所以连点两次也不会同时起两份。
+        try:
+            asyncio.create_task(self._execute(req))
+        except Exception:
+            self._running = False
+            raise
+        return True, f"已在后台开始生成（范围：{req.label}，目标：{target}），报告图会直接发到聊天里。"
+
+    def _enqueue(self, request: "DigestRequest | None") -> bool:
         """入队一份待跑的请求；队列满返回 False，调用方据此明确告知用户。"""
         if len(self._queue) >= (self._queue.maxlen or 1):
             return False
@@ -662,17 +723,25 @@ class TechDigestPlugin(Star):
         self._running = False
         return True
 
-    async def _execute(self, request: tuple) -> None:
+    async def _execute(self, request: "DigestRequest | None") -> None:
         """唯一的生成执行入口：跑 → 清忙 → 接着吃队列里的下一份。
 
         进入这里时执行位已经由 `_claim()` 同步占上；之后每吃完一份都要重新抢一次。
+        request=None 表示定时档。
         """
         while True:
             try:
-                if request and request[0] == "daily":
+                if request is None:
                     await self._run_daily_once()
                 else:
-                    await self._generate_and_send(*request[1:])
+                    await self._generate_and_send(
+                        request.umo,
+                        request.since,
+                        request.until,
+                        request.label,
+                        request.incremental,
+                        request.gid,
+                    )
             except Exception as e:
                 logger.error(f"[{PLUGIN_NAME}] 生成任务失败: {e}", exc_info=True)
             finally:
@@ -686,11 +755,6 @@ class TechDigestPlugin(Star):
                 f"[{PLUGIN_NAME}] 接着跑排队的任务（队列还剩 {len(self._queue)} 份）"
             )
 
-    async def _drain_pending(self) -> None:
-        """把排队的第一份接着跑掉（跑完会继续吃后面的）。"""
-        if not self._queue or not self._claim():
-            return
-        await self._execute(self._queue.popleft())
 
     async def _known_groups_text(self) -> str:
         """现在配了哪些群，用来在「找不到这个群」时回答用户。"""
@@ -1364,10 +1428,6 @@ class TechDigestPlugin(Star):
                     break
         return (best_gid, best_hit) if best_gid else (None, "")
 
-    def _parse_range(self, arg: str) -> tuple[float, float, str, bool]:
-        """从一段文本里解析时间范围；解析不出就是「只看没看过的」。"""
-        rng, _matched = self._match_range(arg or "")
-        return rng if rng else (0.0, time.time(), "最新消息", True)
 
     def _resolve_request(self, text: str):
         """把一整句话解析成 (时间范围, 群号, 剩下的没认出来的碎片)。"""
@@ -1541,22 +1601,6 @@ class TechDigestPlugin(Star):
         except json.JSONDecodeError as e:
             logger.warning(f"[{PLUGIN_NAME}] JSON 解析失败: {e}")
             return None
-
-    @staticmethod
-    def _dedupe(items: list, key_fn, cap: int) -> list:
-        seen: set[str] = set()
-        out: list = []
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            key = key_fn(item)
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            out.append(item)
-            if len(out) >= cap:
-                break
-        return out
 
     def _merge_parts(self, parts: list[dict], chat: ChatInterest) -> dict:
         """合并各分片的话题：跨块重复的并成一条，总览按最终留下的话题生成。"""
@@ -1921,7 +1965,6 @@ class TechDigestPlugin(Star):
                 filtered.append(cand)
         if not filtered:
             return []
-        filtered = filtered[: len(filtered)]
         picks = await self._ask_which_images(filtered, chat)
         if picks is None:
             picks = self._heuristic_image_picks(filtered, chat)
@@ -2334,23 +2377,6 @@ class TechDigestPlugin(Star):
             results.append((gid, path, info, is_error))
         return results
 
-    @staticmethod
-    def _norm_list(items, keys: tuple[str, ...]) -> list[dict]:
-        out: list[dict] = []
-        if not isinstance(items, list):
-            return out
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            row = {}
-            for key in keys:
-                value = item.get(key)
-                if isinstance(value, list):
-                    value = "、".join(str(v) for v in value if str(v).strip())
-                row[key] = str(value).strip() if value is not None else ""
-            if any(row[k] for k in keys[:2]):
-                out.append(row)
-        return out
 
     # 私聊类消息类型白名单（各平台命名不同，统一按小写比对）
     _PRIVATE_TYPES = ("friendmessage", "privatemessage", "friend", "private", "temp")
@@ -2397,20 +2423,31 @@ class TechDigestPlugin(Star):
             return False
         return True
 
-    async def _push(self, path: Path) -> bool:
-        """只发报告图，不带任何说明文字。"""
-        if not self._push_target_ok():
+    async def _deliver_report(self, umo: str, path: Path) -> bool:
+        """投递一份报告图，并把「到底发没发出去」写回索引。
+
+        手动、定时、重发都走这里：以前三处各写一遍发送 + 更新状态，
+        改一处就漏两处，状态和现实对不上就是从这儿来的。
+        """
+        if not umo:
+            logger.warning(f"[{PLUGIN_NAME}] 没有收件会话，发不出 {path.name}")
             return False
+        rid = reports.report_id_from_image(path.name)
         try:
             ok = await self.context.send_message(
-                self.push_umo, MessageChain([AstrImage.fromFileSystem(str(path))])
+                umo, MessageChain([AstrImage.fromFileSystem(str(path))])
             )
-            if ok:
-                logger.info(f"[{PLUGIN_NAME}] 已推送 {path.name} -> {self.push_umo}")
-            return bool(ok)
         except Exception as e:
-            logger.error(f"[{PLUGIN_NAME}] 推送失败: {e}", exc_info=True)
-            return False
+            logger.error(f"[{PLUGIN_NAME}] 报告图发送异常 {rid}: {e}", exc_info=True)
+            ok = False
+        if ok is False:
+            logger.warning(f"[{PLUGIN_NAME}] {rid} 发送接口返回失败，保留为未投递")
+            reports.mark_send_failed(self.state, umo, rid, reason="发送接口返回失败")
+        else:
+            logger.info(f"[{PLUGIN_NAME}] 已投递 {path.name} -> {umo}")
+            reports.mark_delivered(self.state, umo, rid)
+        self._save_state()
+        return ok is not False
 
     async def _push_text(self, text: str) -> bool:
         """只有出错时才发文字。"""
@@ -2437,7 +2474,7 @@ class TechDigestPlugin(Star):
                         logger.info(f"[{PLUGIN_NAME}] 定时任务触发 {self.daily_time}")
                         if not self._claim():
                             # 忙碌时排队，别把今天这一份直接丢掉
-                            if self._enqueue(("daily",)):
+                            if self._enqueue(None):
                                 self._last_run_date = today
                                 logger.warning(
                                     f"[{PLUGIN_NAME}] 上一轮还没跑完，今天的定时已排队，等它结束接着跑"
@@ -2448,7 +2485,7 @@ class TechDigestPlugin(Star):
                                 )
                         else:
                             self._last_run_date = today
-                            await self._execute(("daily",))
+                            await self._execute(None)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -2473,13 +2510,12 @@ class TechDigestPlugin(Star):
                 if is_error:
                     await self._push_text(f"群聊情报出错：{info}")
                 continue
-            pushed = await self._push(path)
-            rid = reports.report_id_from_image(path.name)
-            if pushed:
-                reports.mark_delivered(self.state, umo, rid)
-            else:
-                reports.mark_send_failed(self.state, umo, rid, reason="定时推送失败")
-            self._save_state()
+            if not self._push_target_ok():
+                logger.error(
+                    f"[{PLUGIN_NAME}] 推送目标不可用，{path.name} 留在报告目录里没发"
+                )
+                continue
+            await self._deliver_report(umo, path)
 
     @staticmethod
     def _daily_window(now: float) -> tuple[float, float, str]:
@@ -2585,73 +2621,21 @@ class TechDigestPlugin(Star):
         if not self.group_ids:
             return "插件还没配置要监控的群，先让主人在「要总结的群」里加一行。"
 
-        for _gid in self.group_ids:
-            await self._group_name(_gid)  # 预热群名，否则按名字匹配不到群
-        rng, gid, rest = self._resolve_request(f"{when} {group}".strip())
-        if rest and self.smart_parse and len(rest) >= 2:
-            hint = await self._llm_parse_args(rest)
-            if hint:
-                date_hint, group_hint = hint
-                if date_hint:
-                    better, _ = self._match_range(date_hint)
-                    if better:
-                        rng = better
-                if group_hint and not gid:
-                    gid, _ = self._match_group(group_hint)
-        since, until, label, incremental = rng
-        if again:
-            incremental = False
-        if group.strip() and not gid:
-            # 模型给了一个群名却没匹配上：明说没有这个群，别默默改成「全部群」
-            return (
-                f"没有「{group}」这个群，这次不生成（免得白跑一遍浪费额度）。"
-                f"现在配好的群：{await self._known_groups_text()}"
-            )
-
-        # 解析和拒绝都做完，才决定「立刻跑」还是「排队」——两种状态参数完全一样
-        request = (
-            "digest",
+        req, refuse = await self._parse_digest(
             event.unified_msg_origin,
-            since,
-            until,
-            label,
-            incremental,
-            gid,
-            True,
+            f"{when} {group}".strip(),
+            again=again,
+            named_group=group.strip(),
         )
-        if not self._claim():
-            if self._enqueue(request):
-                return "上一份还在生成，这份已经排队，跑完接着发。"
-            return "已经在跑一份、后面还排着队了，等它们跑完再叫我。"
-
-        # 记下「这个会话在等哪份报告」：用户回头问「跑完了吗」才有依据
-        target = "全部群" if gid is None else (
-            self.group_name_map.get(gid) or f"群 {gid}"
-        )
-        reports.mark_generating(
-            self.state,
-            event.unified_msg_origin,
-            gid=gid or "",
-            group=target,
-            label=label,
-        )
-        self._save_state()
-
-        # 生成可能要好几分钟，先立刻回话，图由后台任务直接发到聊天里。
-        # 执行位已经在这行之前同步占上了，所以连点两次也不会同时起两份。
+        if req is None:
+            return refuse
+        started, message = await self._submit_digest(req)
+        if not started:
+            return message
+        # 图由本工具自己发：模型不用再说「好的我帮你生成」
         event.set_extra("chat_intel_tool_sent", True)
-        try:
-            asyncio.create_task(self._execute(request))
-        except Exception:
-            self._running = False
-            raise
-        logger.info(
-            f"[{PLUGIN_NAME}] 工具调用：范围={label} 群={target} 原始「{when} {group}」"
-        )
-        return (
-            f"已在后台开始生成（范围：{label}，目标：{target}），"
-            "报告图会直接发到聊天里。不要再用文字复述或总结，保持沉默即可。"
-        )
+        logger.info(f"[{PLUGIN_NAME}] 工具调用：原始「{when} {group}」")
+        return message + "不要再用文字复述或总结，保持沉默即可。"
 
     # ------------------------------------------------------------------ 读取已有报告
     def _format_topic(self, topic: dict, detailed: bool = False, report_id: str = "") -> str:
@@ -2783,7 +2767,7 @@ class TechDigestPlugin(Star):
         entries = [e for e in reports.entries(self.state, umo) if e.get("id")]
         if gid:
             for entry in reversed(entries):
-                if entry.get("gid") == gid and entry.get("status") != "expired":
+                if entry.get("gid") == gid and reports.status_of(entry) != "expired":
                     return str(entry.get("id") or ""), ""
             found = reports.newest(self.reports_dir, gid, 1)
             if found:
@@ -2795,7 +2779,7 @@ class TechDigestPlugin(Star):
             reports.load(self.reports_dir, focused) or reports.image_of(self.reports_dir, focused)
         ):
             return focused, ""
-        usable = [e for e in entries if e.get("status") != "expired"]
+        usable = [e for e in entries if reports.status_of(e) not in ("expired", "failed")]
         if usable:
             return str(usable[-1].get("id") or ""), ""
         found = reports.newest(self.reports_dir, None, 1)
@@ -3190,32 +3174,17 @@ class TechDigestPlugin(Star):
                 if path is None:
                     logger.info(f"[{PLUGIN_NAME}] 跳过：{info}")
                     if is_error:
-                        await self.context.send_message(
-                            umo, MessageChain().message(f"出错了：{info}")
-                        )
+                        await self._send_text(umo, f"出错了：{info}")
                     elif announce:
                         # 用户主动问的，即使没东西也得回一句，不能当没听见
-                        await self.context.send_message(umo, MessageChain().message(info))
+                        await self._send_text(umo, info)
                     continue
-                delivered = await self.context.send_message(
-                    umo, MessageChain([AstrImage.fromFileSystem(str(path))])
-                )
-                # 索引要跟真实投递结果对齐：生成出来了 ≠ 发出去了
-                rid = reports.report_id_from_image(path.name)
-                if delivered is False:
-                    logger.warning(f"[{PLUGIN_NAME}] {rid} 发送接口返回失败，保留为未投递")
-                    reports.mark_send_failed(self.state, umo, rid, reason="发送接口返回失败")
-                else:
-                    reports.mark_delivered(self.state, umo, rid)
-                self._save_state()
+                await self._deliver_report(umo, path)
                 await asyncio.sleep(1)
         except Exception as e:
             logger.error(f"[{PLUGIN_NAME}] 生成流程异常: {e}", exc_info=True)
             reports.mark_failed(self.state, umo, reason=str(e)[:120])
-            try:
-                await self.context.send_message(umo, MessageChain().message(f"生成失败：{e}"))
-            except Exception:
-                pass
+            await self._send_text(umo, f"生成失败：{e}")
 
     def _migrate_legacy_config(self) -> None:
         """把老配置里隐藏的旧值搬进可见字段，只做一次。"""
@@ -3230,7 +3199,6 @@ class TechDigestPlugin(Star):
             str(self.config.get("push_platform") or ""),
             str(self.config.get("push_uid") or ""),
         )
-        target = after[0] and after[1]
         filled = self.migrate_chat_platforms(
             self.config.get("chats"), getattr(self, "legacy_platform_id", "")
         )
@@ -3267,7 +3235,11 @@ class TechDigestPlugin(Star):
 
     # ------------------------------------------------------------------ 过期清理
     def _prune_old_files(self) -> None:
-        """只保留最近 keep_days 天的消息与图片，防止磁盘无上限增长。"""
+        """只保留最近 keep_days 天的消息、群图、报告和判图缓存。
+
+        报告目录（JSON + 报告图）只由 reports.prune 负责清理；以前这里又扫了一遍
+        *.png 再删一次，两处对同一个目录动手，删了多少还各报一次。
+        """
         cutoff_day = (datetime.now() - timedelta(days=self.keep_days)).strftime("%Y-%m-%d")
         removed_msgs = removed_imgs = 0
         for path in self.store_dir.glob("*.jsonl"):
@@ -3299,29 +3271,23 @@ class TechDigestPlugin(Star):
                 f"消息文件 {removed_msgs} 个、图片 {removed_imgs} 张、"
                 f"报告 {removed_reports} 份、报告图 {removed_report_imgs} 张"
             )
-        # 顺手把报告也按同样天数清理，避免 reports/ 无限膨胀
-        removed_reports = 0
-        cutoff_ts = (datetime.now() - timedelta(days=self.keep_days)).timestamp()
-        for path in self.reports_dir.glob("*.png"):
-            try:
-                if path.stat().st_mtime < cutoff_ts:
-                    path.unlink()
-                    removed_reports += 1
-            except Exception:
-                pass
-        if removed_reports:
-            logger.info(f"[{PLUGIN_NAME}] 清理旧报告 {removed_reports} 份")
         # 图片没了，判定缓存也别留着
+        stale = self._prune_image_cache()
+        if stale:
+            self._save_state()
+            logger.info(f"[{PLUGIN_NAME}] 清理失效的判图缓存 {stale} 条")
+
+    def _prune_image_cache(self) -> int:
+        """判图缓存跟着图片走：图片被清理了，缓存条目也一起丢。"""
         alive = {p.name for p in self.images_dir.rglob("*.jpg")}
         cache = self.state.get("images")
-        if isinstance(cache, dict) and cache:
-            # 缓存键是「兴趣指纹:文件名」，alive 里只有文件名，比对时要去掉前缀
-            stale = [k for k in cache if str(k).split(":", 1)[-1] not in alive]
-            for key in stale:
-                cache.pop(key, None)
-            if stale:
-                self._save_state()
-                logger.info(f"[{PLUGIN_NAME}] 清理失效的判图缓存 {len(stale)} 条")
+        if not isinstance(cache, dict) or not cache:
+            return 0
+        # 缓存键是「兴趣指纹:文件名」，alive 里只有文件名，比对时要去掉前缀
+        stale = [k for k in cache if str(k).split(":", 1)[-1] not in alive]
+        for key in stale:
+            cache.pop(key, None)
+        return len(stale)
 
     def _latest_report(self) -> Path | None:
         files = sorted(

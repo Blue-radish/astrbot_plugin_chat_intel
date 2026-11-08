@@ -1,5 +1,44 @@
 # Changelog
 
+## 2.2.11 — 2026-11-08
+
+**第三份外部审查：八条里七条成立，其中一条是我上一轮埋的 bug。**
+
+审查列了八类问题（遗留代码、重复路径、状态模型、任务调度、格式化读库、清理重复、
+main.py 规模、配置负担）。这轮逐条用探针复现，七条成立；「格式化偷偷读库」成立但收益被
+夸大——真机实测 `_format_report` 一次 8 ms（2 个 jsonl / 514 KB），改成不读库用户感觉不到，
+所以只记下不动结构。配置分层和拆分模块留下一批。
+
+**真 bug（2.2.9 引入的）**：那轮给「正文存档失败」加了 `unreadable`，但状态只有一个字段。
+存档失败后图片发送成功，`mark_delivered` 把 `unreadable` 直接改成 `delivered`，`reason`
+还留着「只能重发图、读不了内容」——于是提示词告诉模型这份可以讨论，其实读不回来。复现：
+
+```
+1) 存档失败     -> status=unreadable
+2) 图片发送成功 -> status=delivered，reason 仍是「正文存档失败…」
+```
+
+- **状态改成算出来的**：落盘只记事实（`phase` / `stored` / `delivered` / `send_error` /
+  `fail_reason`），对外状态由 `reports.status_of()` 派生。图发出去之后 `stored=False` 照样
+  让状态是 `unreadable`，概览也明说「有图但正文没存下来」。老 `state.json` 里只有 `status`
+  的条目照样读得懂（`delivered` / `unreadable` 都反推对了），不需要迁移函数
+- **投递成功过就不回退**：重发失败只记 `send_error`，不会把「用户手里已经有这份」抹掉
+- **删掉 7 处死代码**：`_parse_range`、`_dedupe`、`_norm_list`、`_drain_pending`、
+  `_transcript_cache`、`_migrate_legacy_config` 里没人读的 `target`、`_rule_picks` 里的
+  `filtered[:len(filtered)]`。删前先核调用点：审查说 `_dedupe` 没有生产调用是真的
+  （`main.py` 里那三处匹配其实是 `_dedupe_records`）；`_drain_pending` 只被一条旧测试调着
+- **两个入口合成一条路**：自然语言和 `group_digest` 工具共用 `_parse_digest` +
+  `_submit_digest`，顺带修掉一个真缺陷——自然语言入口以前**不登记**「正在生成」，
+  用户回头问「跑完了吗」查不到。队列里传的不再是八元组，而是 `DigestRequest`
+- **投递只有一条路**：`_deliver_report(umo, path)` 负责「发图 + 写回索引 + 落盘」，
+  手动 / 定时 / 重发都走它；`_push` 和 `_send_image` 一起消失
+- **清理职责分开**：`reports.prune` 独占报告目录，`_prune_old_files` 里那段又扫一遍 `*.png`
+  的代码删掉（同一个目录以前删两遍、日志报两次）
+- **README 修矛盾**：字段表还写着「留空用全局『默认读取账号』」，而同文档 83 行和代码都说
+  没这东西——留空就是跳过这个群并私聊提醒
+- main.py 3331 → 3297 行、124 → 123 个函数；测试 **277 条**（原 272），新增 5 条回归：
+  状态并存、投递不回退、老数据反推、自然语言入口登记占位、执行器接走队列
+
 ## 2.2.10 — 2026-11-08
 
 **真机验收发现的一句空话。**

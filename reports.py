@@ -245,6 +245,52 @@ def _store(state: dict, umo: str, items: list[dict]) -> None:
     _conv(state, umo)["reports"] = items[-INDEX_KEEP:]
 
 
+def _phase(entry: dict) -> str:
+    """任务执行状态：generating / ready / failed / expired。
+
+    老数据只有 status 一个字段，这里兼容读；不需要写迁移函数。
+    """
+    phase = str(entry.get("phase") or "")
+    if phase:
+        return phase
+    legacy = str(entry.get("status") or "")
+    if legacy in ("generating", "failed", "expired"):
+        return legacy
+    return "ready"
+
+
+def _facts(entry: dict) -> tuple[bool, bool]:
+    """读出（正文存下来了没, 发出去了没）。
+
+    新数据直接读字段；老数据只有 status，从它反推——升级后第一次读到的就是老条目，
+    反推错了等于升级把人骗一次。
+    """
+    if "stored" in entry or "delivered" in entry:
+        return bool(entry.get("stored", True)), bool(entry.get("delivered"))
+    legacy = str(entry.get("status") or "")
+    if legacy == "unreadable":
+        return False, True
+    if legacy == "delivered":
+        return True, True
+    return True, False
+
+
+def status_of(entry: dict) -> str:
+    """把几件互不冲突的事实合成一个可读状态（派生出来的，不落盘）。
+
+    以前只有一个 status 字段兼职四件事，于是「正文存档失败」会被「图片发送成功」
+    直接覆盖——图发出去之后索引还宣称这份能讨论，其实正文根本读不回来。
+    现在分开记：phase（跑没跑完）、stored（正文存没存下）、delivered（发没发出去）。
+    """
+    phase = _phase(entry)
+    if phase != "ready":
+        return phase
+    stored, delivered = _facts(entry)
+    if not stored:
+        return "unreadable"
+    return "delivered" if delivered else "generated"
+
+
 def mark_generating(state: dict, umo: str, *, gid: str, group: str, label: str, now=None) -> dict:
     """「我让你跑的那份」：先把占位记下，跑完再换成真报告。"""
     entry = {
@@ -253,14 +299,14 @@ def mark_generating(state: dict, umo: str, *, gid: str, group: str, label: str, 
         "group": str(group or ""),
         "label": str(label or ""),
         "ts": int(now or time.time()),
-        "status": "generating",
+        "phase": "generating",
         "topics": [],
     }
     items = [
         old
         for old in entries(state, umo)
         if not (
-            old.get("status") == "generating"
+            _phase(old) == "generating"
             and old.get("gid") == entry["gid"]
             and old.get("label") == entry["label"]
         )
@@ -270,13 +316,11 @@ def mark_generating(state: dict, umo: str, *, gid: str, group: str, label: str, 
     return entry
 
 
-def resolve(
-    state: dict, umo: str, record: dict, status: str = "generated", stored: bool = True
-) -> dict:
+def resolve(state: dict, umo: str, record: dict, stored: bool = True) -> dict:
     """生成好了：用真报告替换掉同群同范围的占位（没有占位就追加）。
 
-    stored=False 表示正文 JSON 没写成功：图可能发出去了，但读不回来，
-    状态必须如实标成 unreadable，别让人以为还能讨论。
+    stored=False 表示正文 JSON 没写成功：图也许还发得出去，但读不回来。
+    这里只记事实，不判「状态」——发送成功也不会抹掉这个事实。
     """
     entry = {
         "id": str(record.get("id") or ""),
@@ -284,8 +328,11 @@ def resolve(
         "group": str(record.get("group") or ""),
         "label": str((record.get("range") or {}).get("label") or ""),
         "ts": int(record.get("generated_at") or time.time()),
-        "status": "unreadable" if not stored else status,
-        "reason": "" if stored else "正文存档失败，只能重发图、读不了内容",
+        "phase": "ready",
+        "stored": bool(stored),
+        "delivered": False,
+        "send_error": "",
+        "fail_reason": "",
         "topics": [str(topic.get("title") or "") for topic in record.get("topics") or []],
         "image": str(record.get("image") or ""),
         "incomplete": record.get("status") == "incomplete",
@@ -294,7 +341,7 @@ def resolve(
     for index in range(len(items) - 1, -1, -1):
         old = items[index]
         if (
-            old.get("status") == "generating"
+            _phase(old) == "generating"
             and old.get("gid") == entry["gid"]
             and old.get("label") == entry["label"]
         ):
@@ -307,11 +354,13 @@ def resolve(
 
 
 def mark_delivered(state: dict, umo: str, report_id: str) -> bool:
+    """图片真的发出去了。只动投递位，不碰正文是否可读。"""
     items = entries(state, umo)
     hit = False
     for entry in items:
         if entry.get("id") == report_id:
-            entry["status"] = "delivered"
+            entry["delivered"] = True
+            entry["send_error"] = ""
             hit = True
     if hit:
         _store(state, umo, items)
@@ -319,14 +368,14 @@ def mark_delivered(state: dict, umo: str, report_id: str) -> bool:
 
 
 def mark_send_failed(state: dict, umo: str, report_id: str, reason: str = "") -> bool:
-    """生成好了但没发出去：保留 generated，别谎报 delivered。"""
+    """没发出去：投递位保持 False，原因单独记，不污染正文可读性。"""
     items = entries(state, umo)
     hit = False
     for entry in items:
         if entry.get("id") == report_id:
-            if entry.get("status") in ("generated", "delivered"):
-                entry["status"] = "generated"
-                entry["reason"] = reason or "发送失败"
+            # 之前发成功过就保持「已投递」：用户手里确实有这份，重发失败不该改历史
+            entry["delivered"] = bool(entry.get("delivered"))
+            entry["send_error"] = str(reason or "发送失败")
             hit = True
     if hit:
         _store(state, umo, items)
@@ -337,14 +386,14 @@ def mark_failed(state: dict, umo: str, *, gid: str = "", label: str = "", reason
     items = entries(state, umo)
     for index in range(len(items) - 1, -1, -1):
         entry = items[index]
-        if entry.get("status") != "generating":
+        if _phase(entry) != "generating":
             continue
         if gid and entry.get("gid") not in ("", gid):
             continue
         if label and entry.get("label") != label:
             continue
-        entry["status"] = "failed"
-        entry["reason"] = reason
+        entry["phase"] = "failed"
+        entry["fail_reason"] = str(reason or "")
         break
     _store(state, umo, items)
 
@@ -365,29 +414,40 @@ def get_focus(state: dict, umo: str) -> dict:
     return focus if isinstance(focus, dict) else {}
 
 
-def drop_expired(state: dict, report_dir) -> None:
-    """文件被清理掉的索引条目标成 expired，别让模型以为还读得到。"""
-    for umo, conv in (state.get("conversations") or {}).items():
+def drop_expired(state: dict, report_dir) -> int:
+    """文件被清理掉的索引项直接丢掉：留着只会指向一片空白。
+
+    以前是给它盖一个 status="expired"，于是「过期」又得挤进那个状态字段。
+    文件在不在，读的时候就能判断，不必落盘。
+    """
+    removed = 0
+    for _umo, conv in (state.get("conversations") or {}).items():
         if not isinstance(conv, dict):
             continue
+        kept: list[dict] = []
         for entry in conv.get("reports") or []:
             report_id = str(entry.get("id") or "")
-            if not report_id or entry.get("status") == "generating":
+            if not report_id or _phase(entry) == "generating":
+                kept.append(entry)
                 continue
             path = path_for(report_dir, report_id)
-            if path is None or not path.is_file():
-                entry["status"] = "expired"
-                entry["id"] = report_id  # 留着 id，回答时能说清是哪份过期了
+            if path is not None and path.is_file():
+                kept.append(entry)
+            else:
+                removed += 1
+        if len(kept) != len(conv.get("reports") or []):
+            conv["reports"] = kept
         focus = conv.get("focus")
         if isinstance(focus, dict) and focus.get("report_id"):
             focus_path = path_for(report_dir, str(focus["report_id"]))
             if focus_path is None or not focus_path.is_file():
                 conv.pop("focus", None)
+    return removed
 
 
 def blurb(state: dict, umo: str, limit: int = INDEX_KEEP) -> str:
     """注入提示词的一小段：只说标题和定位信息，正文按需用工具读。"""
-    items = [e for e in entries(state, umo) if e.get("status") != "expired"]
+    items = [e for e in entries(state, umo) if status_of(e) != "expired"]
     focus_line = ""
     focus = get_focus(state, umo)
     if focus.get("report_id"):
@@ -401,15 +461,16 @@ def blurb(state: dict, umo: str, limit: int = INDEX_KEEP) -> str:
     for index, entry in enumerate(items[-limit:], 1):
         group = entry.get("group") or (f"群 {entry['gid']}" if entry.get("gid") else "（所有群）")
         label = entry.get("label") or ""
-        status = entry.get("status") or ""
+        status = status_of(entry)
         if status == "generating":
             lines.append(f"{index}) 正在生成：{group}｜{label or '范围未定'}")
             continue
         if status == "failed":
-            lines.append(f"{index}) 生成失败：{group}｜{label}")
+            why = entry.get("fail_reason") or ""
+            lines.append(f"{index}) 生成失败：{group}｜{label}" + (f"（{why}）" if why else ""))
             continue
         if status == "unreadable":
-            lines.append(f"{index}) 有图但正文没存下来（读不了）：{group}｜{label}")
+            lines.append(f"{index}) 有图但正文没存下来（读不了，只能重发图）：{group}｜{label}")
             continue
         topics = [t for t in (entry.get("topics") or []) if t]
         titles = "、".join(topics[:4])

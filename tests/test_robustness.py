@@ -257,9 +257,9 @@ def test_history_paging_continues_when_first_page_is_newer_than_window():
 def test_queue_is_bounded():
     p, _ = make_plugin()
     p._queue = deque(maxlen=2)
-    assert p._enqueue(("digest",)) is True
-    assert p._enqueue(("digest",)) is True
-    assert p._enqueue(("digest",)) is False
+    assert p._enqueue(None) is True
+    assert p._enqueue(None) is True
+    assert p._enqueue(None) is False
     assert len(p._queue) == 2
 
 
@@ -270,7 +270,7 @@ def test_full_queue_tells_the_user():
     p.smart_parse = False
     p._running = True
     p._queue = deque(maxlen=2)
-    p._queue.extend([("digest",), ("digest",)])
+    p._queue.extend([None, None])
     p._group_name = lambda gid: asyncio.sleep(0, result="群")
     sent: list[str] = []
 

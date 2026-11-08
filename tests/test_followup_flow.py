@@ -185,16 +185,13 @@ def test_daily_push_registers_into_conversation_index(tmp_path):
         seen["umo"] = umo
         return [(GID, tmp_path / "reports" / "dailyA.png", "ok", False)]
 
-    async def push_ok(path):
-        return True
-
     p.generate_all = fake_all
-    p._push = push_ok
+    p._push_target_ok = lambda: True  # 收件目标校验另有专门测试
     asyncio.run(p._run_daily_once())
     assert seen["umo"] == UMO, "定时生成必须带上收件会话"
     entries = reports.entries(p.state, UMO)
     assert entries and entries[-1]["id"] == record["id"]
-    assert entries[-1]["status"] == "delivered", "推送成功才算投递"
+    assert reports.status_of(entries[-1]) == "delivered", "推送成功才算投递"
 
 
 def test_daily_push_failure_does_not_claim_delivery(tmp_path):
@@ -208,15 +205,13 @@ def test_daily_push_failure_does_not_claim_delivery(tmp_path):
     async def fake_all(*_a, **_k):
         return [(GID, tmp_path / "reports" / "dailyB.png", "ok", False)]
 
-    async def push_fail(path):
-        return False
-
     p.generate_all = fake_all
-    p._push = push_fail
+    p._push_target_ok = lambda: True
+    p.context = Ctx(ok=False)  # 发送接口返回失败
     asyncio.run(p._run_daily_once())
     entry = reports.entries(p.state, UMO)[-1]
-    assert entry["status"] == "generated", "推送失败不许标已投递"
-    assert "推送失败" in entry.get("reason", "")
+    assert reports.status_of(entry) == "generated", "推送失败不许标已投递"
+    assert "返回失败" in entry.get("send_error", "")
 
 
 # ---------------------------------------------------------------- 读正文 → 查原话
@@ -375,7 +370,7 @@ def test_generate_group_writes_json_and_records_real_range(tmp_path):
     assert record["range"]["requested_since"] == 0
     assert record["range"]["incremental"] is True
     entries = reports.entries(p.state, UMO)
-    assert entries and entries[-1]["status"] == "generated"
+    assert entries and reports.status_of(entries[-1]) == "generated"
 
 
 def test_archive_failure_marks_report_unreadable(tmp_path, monkeypatch):
@@ -388,8 +383,8 @@ def test_archive_failure_marks_report_unreadable(tmp_path, monkeypatch):
     )
     reports.resolve(p.state, UMO, record, stored=False)
     entry = reports.entries(p.state, UMO)[-1]
-    assert entry["status"] == "unreadable"
-    assert "正文存档失败" in entry["reason"]
+    assert reports.status_of(entry) == "unreadable"
+    assert entry["stored"] is False
     assert "读不了" in reports.blurb(p.state, UMO)
 
 
@@ -409,7 +404,7 @@ def test_manual_send_failure_keeps_generated_status(tmp_path):
 
     p.generate_all = fake_all
     asyncio.run(p._generate_and_send(UMO, time.time() - 3600, time.time(), "今天", False, None))
-    assert [e["status"] for e in reports.entries(p.state, UMO)] == ["generated"]
+    assert [reports.status_of(e) for e in reports.entries(p.state, UMO)] == ["generated"]
 
 
 def test_expired_evidence_is_stated_in_the_report(tmp_path):

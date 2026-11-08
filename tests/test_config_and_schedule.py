@@ -26,13 +26,14 @@ def test_run_daily_once_covers_24h_and_is_not_incremental():
         seen.append((since, until, label, incremental, only_gid, umo))
         return [("1", None, "某群：没有消息", False)]
 
-    pushed = []
+    delivered = []
 
-    async def fake_push(path):
-        pushed.append(path)
+    async def fake_deliver(umo, path):
+        delivered.append((umo, path))
+        return True
 
     p.generate_all = fake_generate_all
-    p._push = fake_push
+    p._deliver_report = fake_deliver
     before = time.time()
     asyncio.run(p._run_daily_once())
     since, until, label, incremental, only_gid, umo = seen[0]
@@ -40,23 +41,25 @@ def test_run_daily_once_covers_24h_and_is_not_incremental():
     assert only_gid is None
     assert abs((until - since) - 86400) < 1
     assert since >= before - 86400 - 2
-    assert pushed == []
+    assert delivered == [], "没有报告时不许发任何东西"
 
 
 def test_run_daily_once_pushes_report_image():
     p, _ = make_plugin()
-    pushed = []
+    delivered = []
 
     async def fake_generate_all(*_a, **_k):
         return [("1", __import__("pathlib").Path("x.png"), "ok", False)]
 
-    async def fake_push(path):
-        pushed.append(path)
+    async def fake_deliver(umo, path):
+        delivered.append(path)
+        return True
 
     p.generate_all = fake_generate_all
-    p._push = fake_push
+    p._deliver_report = fake_deliver
+    p._push_target_ok = lambda: True
     asyncio.run(p._run_daily_once())
-    assert len(pushed) == 1
+    assert len(delivered) == 1
 
 
 def test_run_daily_once_reports_errors_to_owner():

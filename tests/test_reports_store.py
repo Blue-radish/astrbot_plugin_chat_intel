@@ -143,12 +143,12 @@ UMO = "bot_a:FriendMessage:110001"
 def test_index_marks_generating_then_resolves():
     state = {}
     reports.mark_generating(state, UMO, gid="220001", group="考古群", label="今天")
-    assert reports.entries(state, UMO)[0]["status"] == "generating"
+    assert reports.status_of(reports.entries(state, UMO)[0]) == "generating"
 
     reports.resolve(state, UMO, record_of())
     items = reports.entries(state, UMO)
     assert len(items) == 1, "同一份报告不该留两条（占位要被替换）"
-    assert items[0]["status"] == "generated"
+    assert reports.status_of(items[0]) == "generated"
     assert items[0]["id"] == record_of()["id"]
     assert items[0]["topics"] == ["刷固件变砖", "求推荐耳机"]
 
@@ -158,7 +158,7 @@ def test_index_marks_delivered():
     rec = record_of()
     reports.resolve(state, UMO, rec)
     assert reports.mark_delivered(state, UMO, rec["id"]) is True
-    assert reports.entries(state, UMO)[0]["status"] == "delivered"
+    assert reports.status_of(reports.entries(state, UMO)[0]) == "delivered"
 
 
 def test_index_keeps_only_recent():
@@ -175,7 +175,9 @@ def test_index_mark_failed():
     state = {}
     reports.mark_generating(state, UMO, gid="220001", group="考古群", label="今天")
     reports.mark_failed(state, UMO, gid="220001", label="今天", reason="模型没给出结构")
-    assert reports.entries(state, UMO)[0]["status"] == "failed"
+    entry = reports.entries(state, UMO)[0]
+    assert reports.status_of(entry) == "failed"
+    assert "模型没给出结构" in entry["fail_reason"]
 
 
 def test_index_is_per_conversation():
@@ -231,10 +233,87 @@ def test_prune_never_removes_protected(tmp_path):
     assert reports.load(tmp_path, "keep_me") is not None
 
 
-def test_drop_expired_marks_entries_without_files(tmp_path):
+def test_drop_expired_forgets_entries_without_files(tmp_path):
+    """文件没了的条目直接丢掉：不再往 status 里塞一个 expired。"""
     state = {}
-    rec = record_of()
+    alive = record_of(report_id="alive_one")
+    gone = record_of(report_id="gone_one", label="昨天")
+    reports.save(tmp_path, alive)
+    (tmp_path / f"{alive['id']}.png").write_bytes(b"x")
+    reports.resolve(state, UMO, alive)
+    reports.resolve(state, UMO, gone)
+    reports.set_focus(state, UMO, "gone_one", 1)
+    assert len(reports.entries(state, UMO)) == 2
+
+    assert reports.drop_expired(state, tmp_path) == 1
+    assert [e["id"] for e in reports.entries(state, UMO)] == ["alive_one"]
+    assert reports.get_focus(state, UMO) == {}, "焦点指的那份正文没了，焦点也要清掉"
+
+
+def test_unreadable_survives_a_successful_delivery(tmp_path):
+    """真机前的回归：正文存档失败 + 图片发送成功，不能把「读不了」冲掉。"""
+    state = {}
+    rec = record_of(report_id="half_broken")
+    reports.resolve(state, UMO, rec, stored=False)
+    assert reports.status_of(reports.entries(state, UMO)[-1]) == "unreadable"
+
+    reports.mark_delivered(state, UMO, "half_broken")
+    entry = reports.entries(state, UMO)[-1]
+    assert entry["delivered"] is True, "图确实发出去了，这个事实要记"
+    assert entry["stored"] is False, "正文没存下来，这个事实不能被覆盖"
+    assert reports.status_of(entry) == "unreadable", "对外状态仍要如实说读不了"
+    assert "读不了" in reports.blurb(state, UMO)
+
+
+def test_legacy_status_is_read_back_correctly():
+    """升级后第一次读到的就是老条目：反推错了等于升级把人骗一次。"""
+    legacy = {
+        "conversations": {
+            UMO: {
+                "reports": [
+                    {"id": "a", "group": "群", "label": "昨天", "status": "delivered", "topics": ["x"]},
+                    {"id": "b", "group": "群", "label": "前天", "status": "unreadable",
+                     "reason": "正文存档失败", "topics": []},
+                    {"id": "", "group": "群", "label": "今天", "status": "generating", "topics": []},
+                    {"id": "c", "group": "群", "label": "大前天", "status": "failed",
+                     "reason": "模型没给出结构", "topics": []},
+                ]
+            }
+        }
+    }
+    assert [reports.status_of(e) for e in reports.entries(legacy, UMO)] == [
+        "delivered",
+        "unreadable",
+        "generating",
+        "failed",
+    ]
+    assert "读不了" in reports.blurb(legacy, UMO), "老条目里的「读不了」也不能丢"
+
+
+def test_resend_failure_keeps_earlier_delivery():
+    """发成功过一次，用户手里就有这份；重发失败不该把历史改回去。"""
+    state = {}
+    rec = record_of(report_id="twice")
     reports.resolve(state, UMO, rec)
-    assert reports.entries(state, UMO)[0]["status"] == "generated"
-    reports.drop_expired(state, tmp_path)
-    assert reports.entries(state, UMO)[0]["status"] == "expired"
+    reports.mark_delivered(state, UMO, "twice")
+    reports.mark_send_failed(state, UMO, "twice", reason="重发时接口失败")
+    entry = reports.entries(state, UMO)[-1]
+    assert entry["delivered"] is True
+    assert reports.status_of(entry) == "delivered"
+    assert entry["send_error"] == "重发时接口失败", "这次失败的原因还是要记下来"
+
+
+def test_send_error_does_not_leak_into_readability(tmp_path):
+    state = {}
+    rec = record_of(report_id="send_bad")
+    reports.resolve(state, UMO, rec)
+    reports.mark_send_failed(state, UMO, "send_bad", reason="接口返回失败")
+    entry = reports.entries(state, UMO)[-1]
+    assert reports.status_of(entry) == "generated"
+    assert entry["send_error"] == "接口返回失败"
+    assert entry["stored"] is True
+
+    reports.mark_delivered(state, UMO, "send_bad")
+    entry = reports.entries(state, UMO)[-1]
+    assert entry["send_error"] == "", "重发成功后错误原因要清掉"
+    assert reports.status_of(entry) == "delivered"

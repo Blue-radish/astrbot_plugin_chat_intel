@@ -39,8 +39,11 @@ class FakeEvent:
 # ---------------------------------------------------------------- 执行器
 def test_execute_drains_queue_serially():
     """定时 + 交互排在一起时要串行跑完，不留滞留项，也不并发。"""
-    p, _ = make_plugin()
-    p._queue = deque([("digest", "umo", 0, 1, "今天", False, None, True)], maxlen=2)
+    p, mod = make_plugin()
+    p._queue = deque(
+        [mod.DigestRequest(umo="umo", since=0, until=1, label="今天", incremental=False)],
+        maxlen=2,
+    )
     seen: list[tuple] = []
     running_flags: list[bool] = []
 
@@ -55,7 +58,7 @@ def test_execute_drains_queue_serially():
     p._run_daily_once = fake_daily
     p._generate_and_send = fake_gen
     assert p._claim() is True
-    asyncio.run(p._execute(("daily",)))
+    asyncio.run(p._execute(None))
     assert seen[0][0] == "daily"
     assert seen[1][0] == "digest"
     assert all(running_flags), "执行期间必须处于忙碌状态"
@@ -65,12 +68,14 @@ def test_execute_drains_queue_serially():
 
 def test_execute_picks_up_request_queued_during_run():
     """跑定时期间塞进队列的交互请求，定时结束后要自动接着跑。"""
-    p, _ = make_plugin()
+    p, mod = make_plugin()
     order: list[str] = []
 
     async def fake_daily():
         order.append("daily")
-        p._enqueue(("digest", "umo", 0, 1, "今天", False, None, True))
+        p._enqueue(
+            mod.DigestRequest(umo="umo", since=0, until=1, label="今天", incremental=False)
+        )
 
     async def fake_gen(*args, **kwargs):
         order.append("digest")
@@ -78,7 +83,7 @@ def test_execute_picks_up_request_queued_during_run():
     p._run_daily_once = fake_daily
     p._generate_and_send = fake_gen
     assert p._claim() is True
-    asyncio.run(p._execute(("daily",)))
+    asyncio.run(p._execute(None))
     assert order == ["daily", "digest"]
     assert not p._queue
 
@@ -91,7 +96,7 @@ def test_execute_clears_busy_even_if_task_crashes():
 
     p._run_daily_once = boom
     assert p._claim() is True
-    asyncio.run(p._execute(("daily",)))
+    asyncio.run(p._execute(None))
     assert p._running is False
 
 
@@ -122,11 +127,9 @@ def test_tool_parameters_are_identical_when_busy_and_idle():
             p.tool_group_digest(ev, when="昨天", group="极东", again=True)
         )
         request = created[0] if created else p._queue[0]
-        assert request[0] == "digest"
-        _kind, _umo, since, until, label, incremental, gid, _announce = request
-        assert gid == "2", f"running={running} 时群号解析不一致：{request}"
-        assert incremental is False, f"running={running} 时 again 被忽略"
-        assert label == "昨天"
+        assert request.gid == "2", f"running={running} 时群号解析不一致：{request}"
+        assert request.incremental is False, f"running={running} 时 again 被忽略"
+        assert request.label == "昨天"
         assert ("排队" in out) is running
 
 
@@ -135,7 +138,7 @@ def test_unknown_group_never_queued_when_busy():
     created = _prep_tool(p, True)
     ev = FakeEvent(text="群聊情报把今天的Slack群跑一份")
     out = asyncio.run(p.tool_group_digest(ev, when="今天", group="Slack"))
-    assert "没有「Slack」这个群" in out
+    assert "没找到「Slack」这个群" in out
     assert not p._queue and not created
 
 

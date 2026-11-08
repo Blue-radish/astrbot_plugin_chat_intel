@@ -6,6 +6,7 @@ import re
 from types import SimpleNamespace
 
 from conftest import PLUGIN_DIR, make_plugin
+import reports
 from intent import detect_intent
 from interest import ChatInterest, normalize_topics
 
@@ -300,21 +301,56 @@ def test_busy_request_is_queued_instead_of_dropped():
     ev = FakeEvent(gid="", text="群聊情报今天的聊了啥")
     asyncio.run(p._handle_intent(ev, detect_intent("群聊情报今天的聊了啥")))
     assert p._queue and len(p._queue) == 1, list(p._queue)
-    assert p._queue[0][0] == "digest"
+    assert p._queue[0].umo == ev.unified_msg_origin
     assert sent and "排队" in sent[0]
 
 
-def test_drain_pending_runs_the_queued_request():
+def test_natural_language_entry_registers_the_placeholder():
+    """直通入口以前不登记「正在生成」：用户回头问「跑完了吗」根本查不到这条。"""
     p, _ = make_plugin()
-    p._queue.append(("digest", "umo", 0, 1, "今天", False, None, True))
+    p.chats = [ChatInterest("1", "p", ("甲",))]
+    p.group_ids = ["1"]
+    p.group_name_map = {"1": "测试群"}
+    p.smart_parse = False
+    p._save_state = lambda: None
+    p._group_name = _noop_name
+    sent: list[str] = []
+
+    async def fake_send(umo, text):
+        sent.append(text)
+
+    async def fake_execute(request):
+        return None
+
+    p._send_text = fake_send
+    p._execute = fake_execute
+    ev = FakeEvent(gid="", text="群聊情报今天的聊了啥")
+    asyncio.run(p._handle_intent(ev, detect_intent("群聊情报今天的聊了啥")))
+
+    entries = reports.entries(p.state, ev.unified_msg_origin)
+    assert entries and reports.status_of(entries[-1]) == "generating", "两个入口都要登记占位"
+    assert sent and "开始生成" in sent[0]
+
+
+def test_executor_takes_the_queued_request():
+    """排队的那份由执行器接走（原来测的 _drain_pending 早已没人调用，改成测真入口）。"""
+    p, mod = make_plugin()
+    p._queue.append(
+        mod.DigestRequest(umo="umo", since=0, until=1, label="今天", incremental=False)
+    )
     calls = []
 
-    async def fake_gen(*args, **kwargs):
-        calls.append((args, kwargs))
+    async def fake_daily():
+        calls.append("daily")
 
+    async def fake_gen(*args):
+        calls.append(args)
+
+    p._run_daily_once = fake_daily
     p._generate_and_send = fake_gen
-    asyncio.run(p._drain_pending())
+    p._running = True  # 执行位已经占上，_execute 只负责吃队列
+    asyncio.run(p._execute(None))
     assert not p._queue
-    assert len(calls) == 1
+    assert calls == ["daily", ("umo", 0, 1, "今天", False, None)]
 
 
