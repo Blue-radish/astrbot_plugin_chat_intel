@@ -170,7 +170,7 @@ class DigestRequest:
     gid: str | None = None  # None = 所有群
 
 
-@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.11")
+@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.12")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -230,10 +230,10 @@ class TechDigestPlugin(Star):
         # 老配置的一次性迁移（必须在读状态之后：标记存在状态文件里）
         self._migrate_legacy_config()
 
-        self._task: asyncio.Task | None = None
+        self._task: asyncio.Task | None = None      # 定时器
+        self._tasks: set[asyncio.Task] = set()      # 在跑的后台任务（卸载时要一起收）
         self._last_run_date: str | None = None
         self._running = False
-        self._running_since = 0.0
 
         fonts = [
             f.name
@@ -686,7 +686,7 @@ class TechDigestPlugin(Star):
         # 生成可能要好几分钟，先立刻回话，图由后台任务直接发到聊天里。
         # 执行位已经在这行之前同步占上了，所以连点两次也不会同时起两份。
         try:
-            asyncio.create_task(self._execute(req))
+            self._spawn(self._execute(req))
         except Exception:
             self._running = False
             raise
@@ -699,6 +699,17 @@ class TechDigestPlugin(Star):
         self._queue.append(request)
         return True
 
+    def _spawn(self, coro) -> asyncio.Task:
+        """起一个后台任务并**持有引用**。
+
+        不持有就会变成孤儿：插件卸载/重载时没人能取消它，它还能继续写状态文件和发消息。
+        任务结束时自动从集合里摘掉。
+        """
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
+
     def _claim(self) -> bool:
         """同步抢占执行位：返回 True 表示这份由我来跑。
 
@@ -708,19 +719,6 @@ class TechDigestPlugin(Star):
         if self._running:
             return False
         self._running = True
-        self._running_since = time.time()
-        return True
-
-    def _release_stale_claim(self, limit: float = 3600.0) -> bool:
-        """兜底：任务被取消导致占位没释放时，超过 limit 秒强制放掉。"""
-        if not self._running:
-            return False
-        if time.time() - float(self._running_since or 0) < limit:
-            return False
-        logger.error(
-            f"[{PLUGIN_NAME}] 执行位被占了 {int(limit)} 秒以上（任务可能被中断），强制释放"
-        )
-        self._running = False
         return True
 
     async def _execute(self, request: "DigestRequest | None") -> None:
@@ -745,6 +743,19 @@ class TechDigestPlugin(Star):
                         request.gid,
                         announce=True,
                     )
+            except asyncio.CancelledError:
+                # 卸载/重载把任务掐了：占位不能永远停在「正在生成」，否则用户问「跑完了吗」
+                # 会一直被告知还在跑。
+                if request is not None:
+                    reports.mark_failed(
+                        self.state,
+                        request.umo,
+                        gid=request.gid or "",
+                        label=request.label,
+                        reason="任务被取消（插件卸载或重载）",
+                    )
+                    self._save_state()
+                raise
             except Exception as e:
                 logger.error(f"[{PLUGIN_NAME}] 生成任务失败: {e}", exc_info=True)
             finally:
@@ -753,7 +764,6 @@ class TechDigestPlugin(Star):
                 return
             request = self._queue.popleft()
             self._running = True
-            self._running_since = time.time()
             logger.info(
                 f"[{PLUGIN_NAME}] 接着跑排队的任务（队列还剩 {len(self._queue)} 份）"
             )
@@ -830,7 +840,7 @@ class TechDigestPlugin(Star):
             logger.info(f"[{PLUGIN_NAME}] 追问类请求，交给模型处理：「{text[:40]}」")
             return
         event.stop_event()  # 模型这段就别开口了
-        asyncio.create_task(self._handle_intent(event, intent))
+        self._spawn(self._handle_intent(event, intent))
 
     @filter.on_llm_request()
     async def silence_llm(self, event: AstrMessageEvent, req: ProviderRequest) -> bool:
@@ -2496,7 +2506,6 @@ class TechDigestPlugin(Star):
                 raise
             except Exception as e:
                 logger.error(f"[{PLUGIN_NAME}] 定时任务异常: {e}", exc_info=True)
-            self._release_stale_claim()
             await asyncio.sleep(30)
 
     async def _run_daily_once(self) -> None:
@@ -2551,16 +2560,21 @@ class TechDigestPlugin(Star):
             except Exception as e:
                 logger.debug(f"[{PLUGIN_NAME}] 预热群名失败 {gid}: {e}")
         if self._task is None or self._task.done():
-            self._task = asyncio.create_task(self._scheduler())
+            self._task = self._spawn(self._scheduler())
 
     async def terminate(self) -> None:
-        if self._task and not self._task.done():
-            self._task.cancel()
+        """卸载/重载：定时器和在跑的任务一起取消，别留孤儿继续改状态。"""
+        pending = [task for task in self._tasks if not task.done()]
+        for task in pending:
+            task.cancel()
+        for task in pending:
             try:
-                await self._task
+                await task
             except (asyncio.CancelledError, Exception):
                 pass
+        self._tasks.clear()
         self._task = None
+        self._running = False
 
     # ------------------------------------------------------------------ 命令
     # ------------------------------------------------------------------ 模型工具
@@ -2678,7 +2692,11 @@ class TechDigestPlugin(Star):
         return "\n".join(lines)
 
     def _refs_status(self, record: dict) -> str:
-        """报告里的引用，现在还能在本地消息库里核对几条——过期就直说。"""
+        """报告里的引用，现在还能在本地消息库里核对几条——过期就直说。
+
+        注意：这一步会扫一遍本地消息库（扫这个报告覆盖的时段），不是纯计算。
+        不做这件事就没法回答「原话还能不能核」，所以留着；真机 788 条 / 4 小时约 8 ms。
+        """
         refs = {str(r) for topic in (record.get("topics") or []) for r in (topic.get("refs") or [])}
         if not refs:
             return "引用核对：这份报告没记来源引用。"
@@ -2714,6 +2732,10 @@ class TechDigestPlugin(Star):
         )
 
     def _format_report(self, record: dict, topic_no: int = 0) -> str:
+        """把报告 JSON 排成给模型看的文字。
+
+        注意：它会通过 `_refs_status` 读一遍本地消息库（核对引用还在不在），所以不是纯函数。
+        """
         topics = [t for t in (record.get("topics") or []) if isinstance(t, dict)]
         rng = record.get("range") or {}
         covered = record.get("covered") or {}

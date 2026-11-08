@@ -145,6 +145,28 @@ def test_font_dir_is_bundled_not_configurable():
     assert '(self.data_dir / "fonts")' in source
 
 
+# ---------------------------------------------------------------- 配置分层
+def test_fresh_install_does_not_generate_at_night_by_default():
+    """默认不该自己半夜跑一份：定时时间留空，想要就自己填。"""
+    schema = json.loads((PLUGIN_DIR / "_conf_schema.json").read_text(encoding="utf-8-sig"))
+    assert schema["daily_time"]["default"] == "", "默认还是 23:00，等于悄悄替你定了作息"
+    assert "留空" in schema["daily_time"]["description"]
+
+
+def test_schema_puts_everyday_items_before_tuning_knobs():
+    """页面按「日常 → 进阶」排：常用项在前，调节项在后。
+
+    一进设置页先看到 max_messages / render_ppi 这种没人动的旋钮，才是配置负担的来源。
+    """
+    schema = json.loads((PLUGIN_DIR / "_conf_schema.json").read_text(encoding="utf-8-sig"))
+    order = [key for key, item in schema.items() if item.get("invisible") is not True]
+    assert order[0] == "chats", f"第一个该是要总结的群：{order}"
+    everyday = {"include_images", "keep_days", "owner_uids", "daily_time"}
+    assert everyday <= set(order[:10]), f"日常项被挤到后面了：{order}"
+    for knob in ("max_messages", "max_image_mb", "render_ppi"):
+        assert order.index(knob) >= 10, f"{knob} 太靠前：{order}"
+
+
 # ---------------------------------------------------------------- 配置表里不该有的字段
 
 

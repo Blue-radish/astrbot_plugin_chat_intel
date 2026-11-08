@@ -49,7 +49,6 @@ def _prep_tool(p):
     p.group_name_map = {"1": "MeowShelter", "2": "極東電子考古學結社"}
     p.smart_parse = False
     p._running = False
-    p._running_since = 0.0
     p._queue = deque(maxlen=2)
     p._group_name = lambda gid: asyncio.sleep(0, result=p.group_name_map.get(gid, gid))
 
@@ -91,7 +90,7 @@ def test_claim_is_exclusive():
 
 
 def test_claim_released_when_task_crashes():
-    p, _ = make_plugin()
+    p, mod = make_plugin()
     _prep_tool(p)
 
     async def boom(*args, **kwargs):
@@ -99,20 +98,22 @@ def test_claim_released_when_task_crashes():
 
     p._generate_and_send = boom
     assert p._claim() is True
-    asyncio.run(p._execute(("digest", "umo", 0, 1, "今天", False, None, True)))
+    request = mod.DigestRequest(
+        umo="umo", since=0, until=1, label="今天", incremental=False
+    )
+    asyncio.run(p._execute(request))
     assert p._running is False
     assert p._claim() is True, "崩过一次之后执行位必须能再抢"
 
 
-def test_stale_claim_is_released():
+def test_long_job_is_not_forcibly_released():
+    """以前有「占位超过 1 小时就强放」的兜底：大群跑得久会被误判成死在半路，
+    于是同一份被跑第二遍。现在执行位由任务自己在 finally 里放，不再按时长猜。"""
     p, _ = make_plugin()
-    p._running = True
-    p._running_since = time.time() - 7200
-    assert p._release_stale_claim() is True
-    assert p._running is False
-    p._running = True
-    p._running_since = time.time()
-    assert p._release_stale_claim() is False
+    assert not hasattr(p, "_release_stale_claim"), "兜底已经删掉"
+    assert p._claim() is True
+    time.sleep(0.01)
+    assert p._claim() is False, "跑得久也不许被别人抢"
 
 
 # ---------------------------------------------------------------- 2. 宿主补默认值后的迁移
