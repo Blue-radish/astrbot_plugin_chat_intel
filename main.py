@@ -39,6 +39,8 @@ try:  # 插件以包形式被 AstrBot 加载时走相对导入
     from .interest import (
         ChatInterest,
         build_digest_prompt,
+        build_name_map,
+        sanitize_name,
         build_vision_prompt,
         interest_fingerprint,
         merge_topics,
@@ -54,6 +56,8 @@ except ImportError:  # pragma: no cover - 单测按文件路径加载模块
     from interest import (
         ChatInterest,
         build_digest_prompt,
+        build_name_map,
+        sanitize_name,
         build_vision_prompt,
         interest_fingerprint,
         merge_topics,
@@ -134,7 +138,7 @@ TECH_HINTS = (
 
 SYSTEM_PROMPT = """你在给群友写一份私人情报简报。文字克制、具体、可执行。"""
 
-@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递", "2.2.5")
+@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递", "2.2.6")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -1382,7 +1386,11 @@ class TechDigestPlugin(Star):
         moment = datetime.fromtimestamp(ts)
         return moment.strftime("%m-%d %H:%M") if multi_day else moment.strftime("%H:%M")
 
-    def _build_transcript(self, records: list[dict]) -> tuple[str, int, int]:
+    def _build_transcript(
+        self, records: list[dict], name_map: dict[str, str] | None = None
+    ) -> tuple[str, int, int]:
+        if name_map is None:
+            name_map = build_name_map([rec.get("name") for rec in records])
         days = {
             datetime.fromtimestamp(int(rec.get("t") or 0)).date()
             for rec in records
@@ -1401,7 +1409,9 @@ class TechDigestPlugin(Star):
                 continue
             if text in ("[表情]", "[图片]"):
                 continue
-            name = str(rec.get("name") or uid)[:16]
+            name = name_map.get(sanitize_name(rec.get("name"))) or (
+                sanitize_name(rec.get("name")) or str(uid)
+            )[:16]
             ts = int(rec.get("t") or 0)
             stamp = self._stamp(ts, multi_day) if ts else "--:--"
             body = text if text else "[图]"
@@ -1569,15 +1579,22 @@ class TechDigestPlugin(Star):
         return out
 
     @staticmethod
-    def _describe_topics(topics: list[dict], records: list[dict]) -> list[dict]:
+    def _describe_topics(
+        topics: list[dict],
+        records: list[dict],
+        name_map: dict[str, str] | None = None,
+    ) -> list[dict]:
         """给每个话题算出时间范围和参与人：用模型给的消息编号回查原始记录，不靠模型自己写。"""
+        if name_map is None:
+            name_map = build_name_map([rec.get("name") for rec in records])
         out: list[dict] = []
         for topic in topics:
             nums = [n for n in topic.get("msg_nos") or [] if 0 <= n < len(records)]
             picked = [records[n] for n in nums]
             names: list[str] = []
             for rec in picked:
-                name = str(rec.get("name") or "").strip()
+                raw = sanitize_name(rec.get("name"))
+                name = name_map.get(raw, raw)
                 if name and name not in names:
                     names.append(name)
             out.append(
@@ -2075,7 +2092,8 @@ class TechDigestPlugin(Star):
         if not records:
             return None, f"{group_name}：{label}没有消息", False
 
-        transcript, msg_count, people = self._build_transcript(records)
+        name_map = build_name_map([rec.get("name") for rec in records])
+        transcript, msg_count, people = self._build_transcript(records, name_map)
         if not transcript.strip():
             return None, f"{group_name}：{label}只有表情和图片，没有可总结的文本", False
 
@@ -2107,7 +2125,7 @@ class TechDigestPlugin(Star):
 
         data = self._merge_parts(parts, chat)
 
-        topics = self._describe_topics(data.get("topics") or [], records)
+        topics = self._describe_topics(data.get("topics") or [], records, name_map)
         if not topics:
             # 完整跑完但一条都没命中：也要把游标推上去，否则「看最新」每次都会重跑同一批消息
             if incremental and not incomplete:

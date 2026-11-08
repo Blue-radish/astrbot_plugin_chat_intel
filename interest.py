@@ -16,6 +16,7 @@ TOPIC_CAP = 0
 
 # 一张话题卡里最多列几个参与人（多了用「等 N 人」带过）
 MEMBER_CAP = 4
+NAME_DISPLAY_CAP = 10  # 报告里昵称最多留几个字，超了截短（群里有些昵称是整条广告）
 
 
 @dataclass(frozen=True)
@@ -137,6 +138,9 @@ _RULES = """硬性规则：
    必要时点一句「随后更正」。
 10. 正文里直接写群友昵称（从记录里照抄，例如「沂水' Yi 说早入职只能填 16 日」），
    不要写「有群友提到」「有人」「大家」这类模糊说法；确实看不出是谁在说，才用「群里」。
+   但不要一句一个人地罗列流水账：多人说的是同一个意思就合并成一句
+   （「X、Y 都建议先私聊」「有几个人都提到半年内离职要退安家费」），
+   只有观点不同、或者各自提供了不同信息时才分开点名。整段读起来要像叙述，不像会议记录。
 11. msg_nos 要覆盖正文用到的关键事实、观点、纠正和结果，并包含相关发言人的消息；
    不要只挑开头一条，也不要把同一时段的无关插话都塞进来。
 12. 记录里没有的东西绝对不要编造；链接只能照抄记录里出现过的。
@@ -339,6 +343,58 @@ def topic_time_range(times: list[int]) -> str:
     first = datetime.fromtimestamp(stamps[0]).strftime("%H:%M")
     last = datetime.fromtimestamp(stamps[-1]).strftime("%H:%M")
     return first if first == last else f"{first}-{last}"
+
+
+_NAME_TAIL = "，,、。.！!？?：:；;｜|·-—_~～ "
+
+
+def sanitize_name(name: str) -> str:
+    """昵称里可能混进控制字符（有的客户端会把表情或格式符写进昵称），排版时显示成乱码方块。"""
+    import unicodedata
+
+    clean = str(name or "")
+    kept = []
+    for ch in clean:
+        if ch in "\n\t\r":
+            kept.append(" ")
+            continue
+        if unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co"):
+            continue
+        kept.append(ch)
+    return " ".join("".join(kept).split())
+
+
+def shorten_name(name: str, cap: int = NAME_DISPLAY_CAP) -> str:
+    """昵称太长就截短：群里不少人把广告、状态、表情符号塞进昵称，整条塞进正文会把一行占满。"""
+    clean = sanitize_name(name)
+    if len(clean) <= cap:
+        return clean
+    head = clean[:cap].rstrip(_NAME_TAIL)
+    return (head or clean[:cap]) + "…"
+
+
+def build_name_map(names, cap: int = NAME_DISPLAY_CAP) -> dict[str, str]:
+    """一次算出整份报告用的「原名 → 显示名」，正文高亮和参与人栏都用它，免得同一个人两种写法。
+
+    长昵称截短后如果和别的成员撞了（比如「一二三…甲」「一二三…乙」截完一样），就多留几个字。
+    """
+    unique = sorted({sanitize_name(n) for n in names or () if sanitize_name(n)})
+    mapping = {name: name for name in unique if len(name) <= cap}
+    taken = set(mapping.values())
+    long_names = sorted([n for n in unique if len(n) > cap], key=len, reverse=True)
+    for name in long_names:
+        cut = cap
+        while cut < len(name):
+            head = name[:cut].rstrip(_NAME_TAIL) or name[:cut]
+            cand = head + "…"
+            if cand not in taken:
+                break
+            cut += 2
+        else:
+            cand = name  # 加到全名还是不撞，就直接用全名
+        mapping[name] = cand
+        taken.add(cand)
+    return mapping
 
 
 def topic_members(names: list[str], cap: int = MEMBER_CAP) -> str:

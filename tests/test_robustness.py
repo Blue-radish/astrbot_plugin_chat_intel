@@ -162,7 +162,7 @@ def test_failed_chunk_marks_report_incomplete_and_keeps_cursor():
         return "测试群"
 
     p._group_name = fake_name
-    p._build_transcript = lambda recs: ("转录内容", len(recs), 2)
+    p._build_transcript = lambda recs, name_map=None: ("转录内容", len(recs), 2)
     p._split_chunks = lambda transcript: ["第1段", "第2段"]
     calls = {"n": 0}
 
@@ -378,7 +378,7 @@ def test_all_chunks_failing_reports_error_and_keeps_cursor():
     records = [{"t": 100, "name": "甲", "text": "说点什么", "imgs": []}]
     p._load_records = lambda gid, since, until: records
     p._group_name = lambda gid: asyncio.sleep(0, result="测试群")
-    p._build_transcript = lambda recs: ("转录内容", len(recs), 1)
+    p._build_transcript = lambda recs, name_map=None: ("转录内容", len(recs), 1)
     p._split_chunks = lambda transcript: ["第1段"]
 
     async def always_none(*args, **kwargs):

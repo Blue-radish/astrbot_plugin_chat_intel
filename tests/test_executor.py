@@ -206,7 +206,7 @@ def test_error_object_counts_as_failed_chunk():
         {"t": 100, "name": "甲", "text": "说点什么", "imgs": []}
     ]
     p._group_name = lambda gid: asyncio.sleep(0, result="测试群")
-    p._build_transcript = lambda recs: ("转录内容", len(recs), 1)
+    p._build_transcript = lambda recs, name_map=None: ("转录内容", len(recs), 1)
     p._split_chunks = lambda transcript: ["第1段", "第2段"]
     answers = iter([
         {"error": "bad result"},
@@ -307,7 +307,7 @@ def test_info_is_filled_when_report_is_complete():
         {"t": 100, "name": "甲", "text": "说点什么", "imgs": []}
     ]
     p._group_name = lambda gid: asyncio.sleep(0, result="测试群")
-    p._build_transcript = lambda recs: ("转录内容", len(recs), 1)
+    p._build_transcript = lambda recs, name_map=None: ("转录内容", len(recs), 1)
     p._split_chunks = lambda transcript: ["第1段"]
 
     async def fake_extract(*args, **kwargs):
