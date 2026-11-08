@@ -343,8 +343,9 @@ def test_executor_takes_the_queued_request():
     async def fake_daily():
         calls.append("daily")
 
-    async def fake_gen(*args):
+    async def fake_gen(*args, **kwargs):
         calls.append(args)
+        p._announce_seen = kwargs.get("announce", False)
 
     p._run_daily_once = fake_daily
     p._generate_and_send = fake_gen
@@ -352,5 +353,6 @@ def test_executor_takes_the_queued_request():
     asyncio.run(p._execute(None))
     assert not p._queue
     assert calls == ["daily", ("umo", 0, 1, "今天", False, None)]
+    assert p._announce_seen is True, "用户主动要的那份要 announce：没命中也要回一句"
 
 

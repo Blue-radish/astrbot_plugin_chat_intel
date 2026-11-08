@@ -734,6 +734,8 @@ class TechDigestPlugin(Star):
                 if request is None:
                     await self._run_daily_once()
                 else:
+                    # 用户主动要的：哪怕一条都没命中也要回一句，不能当作没听见。
+                    # 定时档不 announce——没人问，别半夜给人发「今天没消息」。
                     await self._generate_and_send(
                         request.umo,
                         request.since,
@@ -741,6 +743,7 @@ class TechDigestPlugin(Star):
                         request.label,
                         request.incremental,
                         request.gid,
+                        announce=True,
                     )
             except Exception as e:
                 logger.error(f"[{PLUGIN_NAME}] 生成任务失败: {e}", exc_info=True)
