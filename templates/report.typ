@@ -121,32 +121,50 @@
     // 这个话题自己的图（最多几张由配置决定）
     // 竖图不能把整行拉太长：单图 200pt、并排 96pt，等比缩进去居中
     #let pics = t.at("images", default: ())
+    // 长图（文字截图一类的超高图）要独占整行：挤在两列里字只有一半大小，手机上根本看不清
+    #let wides = pics.filter(p => p.at("wide", default: false))
+    #let normals = pics.filter(p => not p.at("wide", default: false))
     #if pics.len() > 0 [
       #block(above: 7pt, below: 0pt)[
-        #grid(
-          columns: if pics.len() == 1 { (1fr,) } else { (1fr, 1fr) },
-          gutter: 6pt,
-          row-gutter: 6pt,
-          ..pics.map(p => block(
+        // 先一张张铺满整行地排长图
+        #for p in wides [
+          #block(
             width: 100%,
             fill: rgb("#fbfcfe"),
             radius: 4pt,
             inset: 4pt,
             stroke: 0.5pt + hair,
           )[
-            // 长图切段横排后本身是「宽」的：按宽度铺满，字号才够看；
-            // 其它图继续按高度约束，避免竖图把卡片拉成一屏
-            #let wide = p.at("wide", default: false)
-            #image(
-              p.at("path"),
-              width: 100%,
-              height: if wide { auto } else if pics.len() == 1 { 200pt } else { 96pt },
-              fit: "contain",
-            )
+            #image(p.at("path"), width: 100%, height: auto, fit: "contain")
             #v(2pt)
             #text(size: 7pt, fill: faint, p.at("caption", default: ""))
-          ]),
-        )
+          ]
+          #v(3pt)
+        ]
+        // 其余小图照旧两列排
+        #if normals.len() > 0 [
+          #grid(
+            columns: if normals.len() == 1 { (1fr,) } else { (1fr, 1fr) },
+            gutter: 6pt,
+            row-gutter: 6pt,
+            ..normals.map(p => block(
+              width: 100%,
+              fill: rgb("#fbfcfe"),
+              radius: 4pt,
+              inset: 4pt,
+              stroke: 0.5pt + hair,
+            )[
+              #image(
+                p.at("path"),
+                width: 100%,
+                height: if normals.len() == 1 { 200pt } else { 96pt },
+                fit: "contain",
+              )
+              #v(2pt)
+              #text(size: 7pt, fill: faint, p.at("caption", default: ""))
+            ]),
+          )
+        ]
       ]
     ]
   ]

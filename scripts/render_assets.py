@@ -19,7 +19,7 @@ ROOT = HERE.parent
 
 sys.path.insert(0, str(ROOT))
 from interest import split_names  # noqa: E402  与插件用同一套「群友 ID」切分
-from imaging import compose_tall_image  # noqa: E402  与插件共用同一套长图切段
+from imaging import compose_tall_image, plan_tall_file  # noqa: E402  与插件共用同一套长图处理
 TEMPLATE = ROOT / "templates" / "report.typ"
 LOGO = ROOT / "assets" / "logo.typ"
 
@@ -261,10 +261,14 @@ def render_report(scene: str, out: Path, fonts: str, ppi: int) -> None:
                     "path": f"img/{dst.name}",
                     "caption": f"示例成员{si + 1} · 11-07 1{si + 2}:04 · 截图",
                 }
-                # 与插件一致：超长竖图切段横排，并标记 wide 让它铺满宽度
-                composed = img_dir / f"{ti}_{si}_tall.png"
-                if compose_tall_image(dst, composed) == composed:
-                    entry["path"] = f"img/{composed.name}"
+                # 与插件一致：长图铺满整行，离谱高的才分段横排
+                plan = plan_tall_file(dst)
+                if plan and plan.get("cols", 0) >= 2:
+                    composed = img_dir / f"{ti}_{si}_tall.png"
+                    if compose_tall_image(dst, composed) == composed:
+                        entry["path"] = f"img/{composed.name}"
+                        entry["wide"] = True
+                elif plan:
                     entry["wide"] = True
                 entries.append(entry)
             payload["topics"][ti]["images"] = entries

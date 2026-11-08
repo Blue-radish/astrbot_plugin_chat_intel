@@ -86,7 +86,8 @@ PER_TOPIC_ASK = 6
 # 一次生成最多问几张图（跨话题总量，第一次跑没有缓存时的花费上限）
 MAX_JUDGE_PER_RUN = 30
 
-IMG_CACHE_VERSION = 4  # 判据说辞/判据维度变化时 +1，旧缓存作废（4：判图改用每群兴趣）
+IMG_CACHE_VERSION = 5  # 判据说辞/判据维度变化时 +1，旧缓存作废
+# 4：判图改用每群兴趣；5：判图提示词改成「与话题和兴趣相关」，缓存键带上话题
 
 CHUNK_CHARS = 55000  # 单次喂给模型的转录上限，超了切片后合并
 MSG_TEXT_CAP = 800  # 单条消息保留多少字（含换行）；超了截断并留标记
@@ -138,7 +139,7 @@ TECH_HINTS = (
 
 SYSTEM_PROMPT = """你在给群友写一份私人情报简报。文字克制、具体、可执行。"""
 
-@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递", "2.2.6")
+@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递", "2.2.7")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -830,7 +831,7 @@ class TechDigestPlugin(Star):
                 "gid": gid,
                 "uid": uid,
                 "name": str(event.get_sender_name() or "")[:16],
-                "text": text[:280],
+                "text": text,
                 "platform": self._platform_of(event),
             }
             if images:
@@ -1690,28 +1691,47 @@ class TechDigestPlugin(Star):
         if not by_idx:
             return {}
 
-        # 每个话题自己的候选：话题引用到的编号，加上这些编号跨度内的图
-        # （模型经常不引用纯「[图]」那一行，所以按跨度取，一张图只归一个话题）
-        per_topic: list[list[dict]] = []
+        # 分配顺序：先把每个话题「自己引用了的」图给它，再按编号跨度补空位。
+        # 之前只按跨度先来先得，前面的话题会把跨度里别的话题明确引用的图抢走，
+        # 而且同一张图（同一文件）可能重复出现。
+        per_topic: list[list[dict]] = [[] for _ in topics]
         claimed: set[int] = set()
-        for topic in topics:
+        used_hash: set[str] = set()
+
+        def take(bucket: list[dict], idx: int, title: str) -> bool:
+            if idx in claimed:
+                return False
+            cand = by_idx[idx]
+            digest = cand.get("hash") or ""
+            if digest and digest in used_hash:
+                claimed.add(idx)  # 同一张图已经挂到别处了，别重复出现
+                return False
+            claimed.add(idx)
+            if digest:
+                used_hash.add(digest)
+            bucket.append(dict(cand, topic=title))
+            return True
+
+        # 第一遍：话题明确引用的图消息
+        for i, topic in enumerate(topics):
+            title = topic.get("title") or ""
+            for idx in sorted({n for n in topic.get("msg_nos") or [] if n in by_idx}):
+                if len(per_topic[i]) >= PER_TOPIC_ASK:
+                    break
+                take(per_topic[i], idx, title)
+        # 第二遍：跨度里剩下的（模型经常不引用纯「[图]」那一行，按跨度兜一下）
+        for i, topic in enumerate(topics):
+            if len(per_topic[i]) >= PER_TOPIC_ASK:
+                continue
             nums = sorted({n for n in topic.get("msg_nos") or [] if 0 <= n < len(records)})
             if not nums:
-                per_topic.append([])
                 continue
             lo, hi = nums[0], nums[-1]
-            own = [
-                i
-                for i in sorted(by_idx)
-                if (i in nums or lo <= i <= hi) and i not in claimed
-            ]
-            claimed.update(own)
-            per_topic.append(
-                [
-                    dict(by_idx[i], topic=topic.get("title") or "")
-                    for i in own[-PER_TOPIC_ASK:]
-                ]
-            )
+            for idx in sorted(by_idx):
+                if len(per_topic[i]) >= PER_TOPIC_ASK:
+                    break
+                if lo <= idx <= hi:
+                    take(per_topic[i], idx, topic.get("title") or "")
         logger.info(
             f"[{PLUGIN_NAME}] 图分配：{len(by_idx)} 张带图消息，各话题命中 "
             f"{[len(x) for x in per_topic]}"
@@ -1753,6 +1773,21 @@ class TechDigestPlugin(Star):
                 out[i] = [self._image_entry(cand) for cand in chosen]
         return out
 
+    def _file_hash(self, path: Path) -> str:
+        """文件内容哈希：同一张图被转存/重发多次时用来去重（按文件名去不掉）。"""
+        cache = getattr(self, "_hash_cache", None)
+        if cache is None:
+            cache = self._hash_cache = {}
+        key = str(path)
+        if key in cache:
+            return cache[key]
+        try:
+            digest = hashlib.sha1(path.read_bytes()).hexdigest()
+        except Exception:
+            digest = ""
+        cache[key] = digest
+        return digest
+
     def _image_candidates(self, records: list[dict]) -> list[dict]:
         """挑出带图的消息，连同它前后两条的文字，供判图用。idx 消息在 records 里的下标。"""
         candidates: list[dict] = []
@@ -1769,6 +1804,7 @@ class TechDigestPlugin(Star):
                     "idx": idx,
                     "rec": rec,
                     "files": files,
+                    "hash": self._file_hash(files[0]),
                     "prev": str(records[idx - 1].get("text") or "") if idx > 0 else "",
                     "next": str(records[idx + 1].get("text") or "")
                     if idx + 1 < len(records)
@@ -1777,9 +1813,14 @@ class TechDigestPlugin(Star):
             )
         return candidates
 
-    def _image_cache_key(self, chat: ChatInterest, path: Path) -> str:
-        """判图缓存键：标签指纹 + 文件名。换群或改了标签就重新判。"""
-        return f"{interest_fingerprint(chat)}:{path.name}"
+    def _image_cache_key(self, chat: ChatInterest, path: Path, topic: str = "") -> str:
+        """判图缓存键：标签指纹 + 话题 + 文件名。
+
+        判图时会带着话题标题和前后文看，同一张图在不同话题里的意义可能完全不同，
+        所以话题也要进键；只按标签+文件名缓存，会把 A 话题的结论直接套到 B 话题上。
+        """
+        tag = hashlib.sha1(str(topic or "").strip().encode("utf-8")).hexdigest()[:8]
+        return f"{interest_fingerprint(chat)}:{tag}:{path.name}"
 
     def _reset_image_cache_if_stale(self) -> None:
         if self.state.get("images_version") != IMG_CACHE_VERSION:
@@ -1797,7 +1838,7 @@ class TechDigestPlugin(Star):
 
         async def judge(cand: dict) -> None:
             path = cand["files"][0]
-            key = self._image_cache_key(chat, path)
+            key = self._image_cache_key(chat, path, cand.get("topic") or "")
             cached = cache.get(key)
             if isinstance(cached, dict) and "keep" in cached:
                 results[key] = cached
@@ -1814,7 +1855,9 @@ class TechDigestPlugin(Star):
         kept: list[dict] = []
         dropped: list[str] = []
         for cand in candidates:
-            verdict = results.get(self._image_cache_key(chat, cand["files"][0]))
+            verdict = results.get(
+                self._image_cache_key(chat, cand["files"][0], cand.get("topic") or "")
+            )
             if verdict and verdict.get("keep"):
                 cand["kind"] = verdict.get("kind") or ""
                 cand["ocr"] = verdict.get("text") or ""
@@ -1987,15 +2030,20 @@ class TechDigestPlugin(Star):
     # ------------------------------------------------------------------ 渲染
     # 长图（超长竖图）处理：实现在 imaging.py，出图脚本也复用同一套
     TALL_RATIO = imaging.TALL_RATIO
-    TALL_MAX_SLICES = imaging.TALL_MAX_SLICES
-    TARGET_ASPECT = imaging.TARGET_ASPECT
+    STACK_RATIO = imaging.STACK_RATIO
+    SLICE_MAX = imaging.SLICE_MAX
 
     @staticmethod
-    def compose_tall_image(src: Path, dst: Path) -> Path:
-        """超长竖图切段横排；不需要切或失败都原样返回 src。"""
+    def plan_tall_image(src: Path) -> dict | None:
+        """这张图要不要特殊排版：None 普通图；cols=1 铺满整行；cols≥2 分段横排。"""
+        return imaging.plan_tall_file(src)
+
+    @staticmethod
+    def compose_tall_image(src: Path, dst: Path) -> Path | None:
+        """超高的图分段横排到 dst；不需要分段或失败返回 None。"""
         out = imaging.compose_tall_image(src, dst)
         if out == dst:
-            logger.info(f"[{PLUGIN_NAME}] 长图切段横排：{src.name} → {dst.name}")
+            logger.info(f"[{PLUGIN_NAME}] 长图分段横排：{src.name} → {dst.name}")
         return out
 
     def _render(self, payload: dict, gid: str, label: str) -> Path | None:
@@ -2021,10 +2069,13 @@ class TechDigestPlugin(Star):
                     src = Path(img.get("path") or "")
                     if not src.is_file():
                         continue
-                    # 超长竖图先切段横排，否则缩到 200pt 高就只剩一条看不清
+                    # 长图分两种：普通高的整张铺满一行（字最大），离谱高的才分段横排
                     seq += 1
+                    plan = self.plan_tall_image(src)
                     composed = img_dir / f"{seq}.png"
-                    sliced = self.compose_tall_image(src, composed) == composed
+                    sliced = bool(plan and plan.get("cols", 0) >= 2) and (
+                        self.compose_tall_image(src, composed) == composed
+                    )
                     if sliced:
                         dst = composed
                     else:
@@ -2035,8 +2086,8 @@ class TechDigestPlugin(Star):
                         except Exception:
                             continue
                     entry = {"path": f"img/{dst.name}", "caption": img.get("caption") or ""}
-                    if sliced:
-                        # 切段横排过的长图本身就是「宽」的，铺满版心比卡高度看得更清
+                    if sliced or plan:
+                        # 长图铺满版心：挤在两列里字只有一半大小，手机上读不了
                         entry["wide"] = True
                     copies.append(entry)
                 topic["images"] = copies

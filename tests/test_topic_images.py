@@ -12,8 +12,9 @@ CHAT = ChatInterest("1", "p", ("电脑",), (), "", "")
 
 
 def _shots(tmp_path, names):
-    for name in names:
-        (tmp_path / name).write_bytes(b"\x89PNG\r\n")
+    for i, name in enumerate(names):
+        # 内容要各不相同：同内容的文件会被当成同一张图去重掉
+        (tmp_path / name).write_bytes(b"\x89PNG\r\n" + str(i).encode())
 
 
 def _records():
