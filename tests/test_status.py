@@ -25,19 +25,19 @@ def test_apply_chats_has_no_global_fallback_account():
 
 def test_status_line_shows_read_account_and_warns_missing_want():
     p, _ = make_plugin()
-    chat = ChatInterest("1", "bot_b", ("复古硬件",), (), "", "")
+    chat = ChatInterest("1", "bot_b", ("复古硬件",), ())
     line = p._chat_status_line(chat, "古董群", 12, 3, "11-07 23:00")
     assert "读历史用 bot_b" in line
     assert "12 条" in line
     assert "带图 3 条" in line
 
-    empty = ChatInterest("2", "bot_a", (), (), "", "")
+    empty = ChatInterest("2", "bot_a", (), ())
     assert "未配置标签" in p._chat_status_line(empty, "空群", 0, 0, "")
 
 
 def test_status_line_flags_missing_read_account():
     p, _ = make_plugin()
-    chat = ChatInterest("3", "", ("复古硬件",), (), "", "")
+    chat = ChatInterest("3", "", ("复古硬件",), ())
     assert "⚠ 没填读取账号" in p._chat_status_line(chat, "某群", 0, 0, "")
 
 

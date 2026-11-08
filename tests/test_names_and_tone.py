@@ -89,7 +89,7 @@ def test_body_names_match_member_names():
 
 # ---------------------------------------------------------------- 叙述口吻
 def test_prompt_forbids_speaker_by_speaker_lists():
-    chat = ChatInterest("1", "p", ("计算机",), (), "", "")
+    chat = ChatInterest("1", "p", ("计算机",), ())
     prompt = build_digest_prompt(chat, "测试群", "今天", "[10:00] #0 甲: 你好")
     assert "罗列流水账" in prompt
     assert "像叙述，不像会议记录" in prompt

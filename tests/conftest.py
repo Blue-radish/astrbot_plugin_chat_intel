@@ -7,6 +7,7 @@
 import importlib.util
 import pathlib
 import sys
+import time
 
 PLUGIN_DIR = pathlib.Path(__file__).resolve().parents[1]
 ASTRBOT_ROOT = pathlib.Path(r"C:\Users\Ray\astrbot")
@@ -16,6 +17,22 @@ for _p in (str(PLUGIN_DIR), str(ASTRBOT_ROOT)):
         sys.path.insert(0, _p)
 
 _MODULE = None
+
+
+def today_base(now: float | None = None, count: int = 40, step: int = 5) -> int:
+    """造数据用的时间基准，保证落在「今天」窗口里且不跑到未来。
+
+    直接写 time.time() - 3600 的测试，在刚过零点时会掉到昨天，「今天」就查不到了，
+    于是每天 0 点到 1 点之间这套测试必然红一次（不是代码坏了，是基准歪了）。
+    """
+    from datetime import datetime
+
+    if now is None:
+        now = time.time()
+    start = datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    base = max(start, now - 3600)
+    # 刚过零点的几分钟里，基准贴着 0 点会让后面几行跑到未来（查询用到 until=now 就漏掉了）
+    return int(max(start, min(base, now - (count - 1) * step - 1)))
 
 
 def load_main():

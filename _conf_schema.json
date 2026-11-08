@@ -35,11 +35,6 @@
             "description": "不要的标签（可空）：一行一个或逗号分隔",
             "default": "",
             "hint": "告诉模型哪些话题别收，例如 二手交易、砍价。由模型按语义判断，不是严格的过滤器"
-          },
-          "title": {
-            "type": "string",
-            "description": "这份报告的标题（留空用全局标题）",
-            "default": ""
           }
         },
         "display_item": "gid"
@@ -98,8 +93,9 @@
   },
   "report_title": {
     "type": "string",
-    "description": "报告标题",
-    "default": "群聊情报"
+    "description": "报告标题的后半截",
+    "default": "群聊情报",
+    "hint": "报告标题 = 群名备注（没填就用群名）· 这里填的词，例如「电脑互助群 · 群聊情报」。留空则只显示群名"
   },
   "use_local_store": {
     "type": "bool",

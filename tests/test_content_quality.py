@@ -64,7 +64,7 @@ def test_transcript_keeps_short_stamp_for_one_day():
 # ---------------------------------------------------------------- 总览
 def test_headline_lists_topics_when_multi_chunk():
     p, _ = make_plugin()
-    chat = ChatInterest("1", "p", ("甲",), (), "", "")
+    chat = ChatInterest("1", "p", ("甲",), ())
     a = {"headline": "在聊装黑苹果", "topics": [{"title": "装黑苹果翻车", "tags": ["甲"], "msg_nos": [1], "summary": "x"}]}
     b = {"headline": "还有别的", "topics": [{"title": "二手显卡报价", "tags": ["甲"], "msg_nos": [9], "summary": "y"}]}
     merged = p._merge_parts([a, b], chat)
@@ -73,7 +73,7 @@ def test_headline_lists_topics_when_multi_chunk():
 
 def test_headline_uses_model_line_for_single_topic():
     p, _ = make_plugin()
-    chat = ChatInterest("1", "p", ("甲",), (), "", "")
+    chat = ChatInterest("1", "p", ("甲",), ())
     a = {"headline": "群里在折腾老主板", "topics": [{"title": "386 主板不亮机", "tags": ["甲"], "msg_nos": [1], "summary": "x"}]}
     assert p._merge_parts([a], chat)["headline"] == "群里在折腾老主板"
 
@@ -94,7 +94,7 @@ def test_merge_summary_dedupes_identical_sentences():
 
 # ---------------------------------------------------------------- 提示词规则
 def _prompt():
-    chat = ChatInterest("1", "p", ("本地部署大模型",), ("二手交易",), "", "")
+    chat = ChatInterest("1", "p", ("本地部署大模型",), ("二手交易",))
     return build_digest_prompt(chat, "测试群", "今天", "[10:00] #0 甲: 你好")
 
 
@@ -136,7 +136,7 @@ def test_prompt_does_not_ask_model_to_describe_images():
 
 
 def test_vision_prompt_judges_by_relevance_not_fixed_categories():
-    chat = ChatInterest("1", "p", ("摄影器材",), (), "", "")
+    chat = ChatInterest("1", "p", ("摄影器材",), ())
     prompt = build_vision_prompt(chat, "摄影群", "上文", "看图", "下文", "长焦样片对比")
     assert "提供了文字之外有效信息" in prompt
     assert "本身就是这件事的证据" in prompt

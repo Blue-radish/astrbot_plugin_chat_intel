@@ -7,7 +7,7 @@ import time
 import pytest
 
 import reports
-from conftest import make_plugin
+from conftest import make_plugin, today_base
 
 GID = "220001"
 UMO = "bot_a:FriendMessage:110001"
@@ -159,7 +159,7 @@ def write_store(tmp_path, rows):
 
 
 def make_rows(n=24, base=None):
-    base = base or time.time() - 3600
+    base = base or today_base()
     return [
         {
             "gid": GID,

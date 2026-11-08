@@ -199,7 +199,7 @@ def test_push_refuses_group_target():
 
 
 def test_topics_tolerate_numbered_or_punctuated_tags():
-    chat = ChatInterest("1", "p", ("复古硬件", "元件行情"), (), "", "")
+    chat = ChatInterest("1", "p", ("复古硬件", "元件行情"), ())
     topics = [
         {"title": "电容代换", "tags": ["1. 复古硬件"], "msg_nos": [1], "summary": "a"},
         {"title": "行情", "tags": ["元件行情。"], "msg_nos": [2], "summary": "b"},

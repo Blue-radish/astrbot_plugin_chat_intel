@@ -25,8 +25,7 @@ class ChatInterest:
     platform: str
     tags_pos: tuple[str, ...] = ()
     tags_neg: tuple[str, ...] = ()
-    title: str = ""
-    name: str = ""
+    name: str = ""  # 群名备注；报告标题就用它（或自动检测到的群名）
 
 
 def _split(value) -> tuple[str, ...]:
@@ -84,7 +83,6 @@ def parse_chats(raw, fallback_platform: str = "") -> tuple[list[ChatInterest], l
                 platform=str(row.get("platform") or "").strip() or fallback_platform,
                 tags_pos=tags_pos,
                 tags_neg=tags_neg,
-                title=str(row.get("title") or "").strip(),
                 name=str(row.get("name") or "").strip(),
             )
         )

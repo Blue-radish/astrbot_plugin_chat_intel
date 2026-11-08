@@ -45,16 +45,16 @@ def test_parse_chats_accepts_comma_and_legacy_want():
 
 
 def test_fingerprint_ignores_order_but_not_content():
-    a = ChatInterest("1", "p", ("甲", "乙"), (), "", "")
-    b = ChatInterest("1", "p", ("乙", "甲"), (), "", "")
-    c = ChatInterest("1", "p", ("甲", "乙", "丙"), (), "", "")
+    a = ChatInterest("1", "p", ("甲", "乙"), ())
+    b = ChatInterest("1", "p", ("乙", "甲"), ())
+    c = ChatInterest("1", "p", ("甲", "乙", "丙"), ())
     assert interest_fingerprint(a) == interest_fingerprint(b)
     assert interest_fingerprint(a) != interest_fingerprint(c)
     assert len(interest_fingerprint(a)) == 12
 
 
 def test_prompt_puts_rules_after_transcript():
-    chat = ChatInterest("1", "p", ("复古硬件",), ("手机开箱",), "", "")
+    chat = ChatInterest("1", "p", ("复古硬件",), ("手机开箱",))
     prompt = build_digest_prompt(chat, "古董群", "今天", "#1 甲: 我有块 486")
     assert prompt.index("#1 甲: 我有块 486") < prompt.index("复古硬件")
     assert "手机开箱" in prompt
@@ -65,7 +65,7 @@ def test_prompt_puts_rules_after_transcript():
 
 def test_prompt_asks_for_complete_narrative():
     """话题要讲完整：prompt 必须点明按事件分话题、长话题写细。"""
-    chat = ChatInterest("1", "p", ("复古硬件",), (), "", "")
+    chat = ChatInterest("1", "p", ("复古硬件",), ())
     prompt = build_digest_prompt(chat, "古董群", "今天", "#1 甲: hi")
     assert "一个话题 = 群友围绕同一件事来回聊的一段" in prompt
     # 篇幅按信息量决定，不给固定字数指标（避免模型凑字数或补写背景）
@@ -75,7 +75,7 @@ def test_prompt_asks_for_complete_narrative():
 
 
 def test_vision_prompt_uses_tags():
-    chat = ChatInterest("1", "p", ("复古硬件",), ("手机开箱",), "", "")
+    chat = ChatInterest("1", "p", ("复古硬件",), ("手机开箱",))
     prompt = build_vision_prompt(chat, "古董群", "上文", "看图", "下文", "386 主板不亮机")
     assert "复古硬件" in prompt and "手机开箱" in prompt
     assert "这个群关心的正向标签" in prompt
@@ -83,7 +83,7 @@ def test_vision_prompt_uses_tags():
 
 
 def test_topics_keep_only_configured_tags():
-    chat = ChatInterest("1", "p", ("电脑", "科研"), (), "", "")
+    chat = ChatInterest("1", "p", ("电脑", "科研"), ())
     topics = [
         {"title": "本地跑大模型", "tags": ["电脑"], "msg_nos": [1, 2], "summary": "讲了很久。"},
         {"title": "乱入的八卦", "tags": ["八卦"], "msg_nos": [3], "summary": "不在标签里。"},
@@ -95,7 +95,7 @@ def test_topics_keep_only_configured_tags():
 
 
 def test_topics_keep_model_order_and_dedupe():
-    chat = ChatInterest("1", "p", ("电脑",), (), "", "")
+    chat = ChatInterest("1", "p", ("电脑",), ())
     topics = [
         {"title": "小事", "tags": ["电脑"], "msg_nos": [1], "summary": "短。"},
         {"title": "大事", "tags": ["电脑"], "msg_nos": [10, 11, 12], "summary": "长。"},
@@ -108,7 +108,7 @@ def test_topics_keep_model_order_and_dedupe():
 
 
 def test_topics_drop_entries_without_numbers_or_summary():
-    chat = ChatInterest("1", "p", ("电脑",), (), "", "")
+    chat = ChatInterest("1", "p", ("电脑",), ())
     topics = [
         {"title": "没编号", "tags": ["电脑"], "msg_nos": [], "summary": "x"},
         {"title": "没总结", "tags": ["电脑"], "msg_nos": [1], "summary": ""},
@@ -117,7 +117,7 @@ def test_topics_drop_entries_without_numbers_or_summary():
 
 
 def test_merge_topics_joins_same_story_across_chunks():
-    chat = ChatInterest("1", "p", ("电脑",), (), "", "")
+    chat = ChatInterest("1", "p", ("电脑",), ())
     chunk1 = [
         {"title": "装黑苹果翻车", "tags": ["电脑"], "msg_nos": [1, 2, 3], "summary": "要先降 BIOS 版本。"}
     ]
@@ -148,7 +148,7 @@ def test_topic_members_caps_and_dedupes():
 
 def test_prompt_demands_rich_detail_and_real_nicknames():
     """正文要贴着原文写、直接点名，不要「有群友提到」这种模糊说法。"""
-    chat = ChatInterest("1", "p", ("复古硬件",), (), "", "")
+    chat = ChatInterest("1", "p", ("复古硬件",), ())
     prompt = build_digest_prompt(chat, "古董群", "今天", "#1 甲: hi")
     assert "原话、命令、报错、链接照抄" in prompt
     assert "有群友提到" in prompt  # 作为反例出现在规则里

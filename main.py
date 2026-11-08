@@ -170,7 +170,7 @@ class DigestRequest:
     gid: str | None = None  # None = 所有群
 
 
-@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.13")
+@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.14")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -1264,6 +1264,20 @@ class TechDigestPlugin(Star):
                 parts.append(f"[{stype}]")
         return "".join(parts).strip()
 
+    def _report_title_for(self, chat, group_name: str) -> str:
+        """报告大标题：群名备注（没有就用检测到的群名）· 全局标题。
+
+        不再给每个群单独设标题：群那么多，一个个填名字纯属多余，群名本身最不会搞错。
+        _group_name 认不出群名时给的是占位词「群聊」，那种情况用群号更清楚。
+        """
+        who = str(getattr(chat, "name", "") or "").strip()
+        if not who:
+            who = str(group_name or "").strip()
+            if not who or who == "群聊":
+                who = str(getattr(chat, "gid", "") or "").strip()
+        suffix = str(self.report_title or "").strip()
+        return f"{who} · {suffix}" if suffix else who
+
     async def _group_name(self, gid: str) -> str:
         """群名自动检测。报告图里只用群名，文字回复里会带群号。"""
         if gid in self.group_name_map:
@@ -2289,9 +2303,10 @@ class TechDigestPlugin(Star):
 
         now = datetime.now()
         payload = {
-            "title": chat.title or self.report_title,
+            # 标题 = 群名备注（或群名）· 全局标题；副标题就只剩群号，免得群名印两遍
+            "title": self._report_title_for(chat, group_name),
             "date": now.strftime("%Y-%m-%d"),
-            "group": group_name,
+            "group": f"群号 {gid}",
             "stats": {
                 "line": f"{len(records)} 条消息 · {len(topics)} 个话题 · {label}",
             },

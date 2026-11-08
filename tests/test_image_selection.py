@@ -7,7 +7,7 @@ import pathlib
 from conftest import make_plugin
 from interest import ChatInterest
 
-CHAT = ChatInterest("1", "p", ("电脑",), (), "", "")
+CHAT = ChatInterest("1", "p", ("电脑",), ())
 
 
 def _shots(tmp_path, names):

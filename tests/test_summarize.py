@@ -35,7 +35,7 @@ def test_transcript_keeps_index_when_lines_are_skipped():
 
 def test_merge_parts_collects_topics_across_chunks():
     p, _ = make_plugin()
-    chat = ChatInterest("1", "p", ("甲",), (), "", "")
+    chat = ChatInterest("1", "p", ("甲",), ())
     a = {"topics": [_topic("装黑苹果翻车", [1, 2, 3], "前半段。")], "quotes": []}
     b = {"topics": [_topic("装黑苹果翻车", [4, 5], "前半段，补上后半段之后这个总结明显更长了。")]}
     merged = p._merge_parts([a, b], chat)
@@ -46,7 +46,7 @@ def test_merge_parts_collects_topics_across_chunks():
 
 def test_merge_parts_drops_topics_without_numbers():
     p, _ = make_plugin()
-    chat = ChatInterest("1", "p", ("甲",), (), "", "")
+    chat = ChatInterest("1", "p", ("甲",), ())
     merged = p._merge_parts(
         [{"topics": [_topic("没有编号", []), _topic("有编号", [7])]}], chat
     )

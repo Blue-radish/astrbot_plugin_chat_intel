@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 import reports
-from conftest import PLUGIN_DIR, make_plugin
+from conftest import PLUGIN_DIR, make_plugin, today_base
 from interest import ChatInterest
 
 GID = "220001"
@@ -93,7 +93,7 @@ def rows_at(base, n, prefix="m", text="说话"):
         {
             "gid": GID,
             "mid": f"{prefix}{i}",
-            "t": base + i * 60,
+            "t": base + i * 5,  # 5 秒一条：25 条也只占两分钟，跨零点照样落在「今天」里
             "uid": f"u{i}",
             "name": f"人{i}",
             "text": f"{text}{i}",
@@ -255,8 +255,8 @@ def test_full_followup_chain(tmp_path):
 def test_query_matches_before_truncating(tmp_path):
     """早于最近 max_messages 条的消息，按引用也要能查到。"""
     p = make(tmp_path, max_messages=4)
-    now = int(time.time())
-    write_rows(tmp_path, rows_at(now - 3600, 10, prefix="m", text="第"))
+    now = today_base()
+    write_rows(tmp_path, rows_at(now, 10, prefix="m", text="第"))
     ref = reports.ref_of({"mid": "m0", "t": now - 3600, "uid": "u0"})
     out = asyncio.run(p.tool_query_records(Ev(), when="今天", msg_ids=ref))
     assert "第0" in out and f"id={ref}" in out
@@ -265,8 +265,8 @@ def test_query_matches_before_truncating(tmp_path):
 def test_query_expands_history_when_local_misses(tmp_path):
     """本地没有、平台还留着：引用查询要回平台补拉一次。"""
     p = make(tmp_path)
-    now = int(time.time())
-    write_rows(tmp_path, rows_at(now - 3600, 3, prefix="t", text="今天的第"))
+    now = today_base()
+    write_rows(tmp_path, rows_at(now, 3, prefix="t", text="今天的第"))
 
     async def with_history(gid, since, until):
         return [
@@ -289,8 +289,8 @@ def test_unsupported_time_expression_returns_guidance(tmp_path):
 def test_browse_by_time_without_keyword(tmp_path):
     """只给时间范围也要能用：按时间倒着给最近一页。"""
     p = make(tmp_path)
-    now = int(time.time())
-    write_rows(tmp_path, rows_at(now - 3600, 25, prefix="m", text="第"))
+    now = today_base()
+    write_rows(tmp_path, rows_at(now, 25, prefix="m", text="第"))
     out = asyncio.run(p.tool_query_records(Ev(), when="今天"))
     assert "共 25 条" in out
     assert "第24" in out, "浏览模式默认给最近的消息"
