@@ -68,17 +68,20 @@ def test_two_background_submissions_run_serially():
         active["now"] -= 1
 
     p._generate_and_send = slow_gen
+    sent: list[str] = []
+    p._send_text = lambda umo, text: sent.append(text) or asyncio.sleep(0)
 
     async def scenario():
-        first = await p.tool_group_digest(FakeEvent(text="群聊情报跑一份"), when="今天")
-        second = await p.tool_group_digest(FakeEvent(text="群聊情报跑一份"), when="今天")
+        await p.tool_group_digest(FakeEvent(text="群聊情报跑一份"), when="今天")
+        await p.tool_group_digest(FakeEvent(text="群聊情报跑一份"), when="今天")
         await asyncio.sleep(0.4)
-        return first, second
 
-    first, second = asyncio.run(scenario())
+    asyncio.run(scenario())
     assert active["peak"] == 1, f"同时跑了两份生成：{active}"
     assert len(order) == 2, f"排队的第二份没跑：{order}"
-    assert "排队" in second and "排队" not in first
+    # 回执由插件自己发：第一条「开始生成」、第二条「已排队」
+    assert len(sent) == 2, sent
+    assert sent[0].startswith("开始生成") and sent[1].startswith("已排队"), sent
 
 
 def test_claim_is_exclusive():

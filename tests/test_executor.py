@@ -122,15 +122,20 @@ def test_tool_parameters_are_identical_when_busy_and_idle():
     for running in (False, True):
         p, _ = make_plugin(owner_uids=["10001"])
         created = _prep_tool(p, running)
+        sent: list[str] = []
+        p._send_text = lambda umo, text: sent.append(text) or asyncio.sleep(0)
         ev = FakeEvent(text="群聊情报把昨天的极东重跑一遍")
-        out = asyncio.run(
+        asyncio.run(
             p.tool_group_digest(ev, when="昨天", group="极东", again=True)
         )
         request = created[0] if created else p._queue[0]
         assert request.gid == "2", f"running={running} 时群号解析不一致：{request}"
         assert request.incremental is False, f"running={running} 时 again 被忽略"
         assert request.label == "昨天"
-        assert ("排队" in out) is running
+        # 回执由插件自己发：「已排队」只在忙碌时出现，「重跑」标记两种状态都得有
+        assert len(sent) == 1, sent
+        assert ("已排队" in sent[0]) is running, sent[0]
+        assert "重跑" in sent[0], sent[0]
 
 
 def test_unknown_group_never_queued_when_busy():

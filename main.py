@@ -11,6 +11,7 @@
 
 import asyncio
 import hashlib
+import itertools
 import io
 import json
 import os
@@ -93,6 +94,10 @@ except Exception:  # pragma: no cover - 没装就退化成原文匹配
 MAX_HISTORY_PAGES = 300
 # 排队上限：正在生成时最多再排两份（交互 + 定时），再多就明说跑了
 QUEUE_MAX = 2
+
+# 每次提交一个自增号：同群同标签的两份请求靠它区分。别用 time.time()——
+# Windows 上同一毫秒内两次提交会拿到同一个数，第二次就把第一次的占位顶掉了。
+_SUBMIT_SEQ = itertools.count(1)
 # 单段总结失败重试次数（含首次）
 CHUNK_RETRY = 2
 
@@ -169,9 +174,10 @@ class DigestRequest:
     incremental: bool
     gid: str | None = None  # None = 所有群
     at: float = 0.0  # 提交时刻：同群同标签的两份请求靠它区分
+    again: bool = False  # 用户要求「重跑」：忽略增量位，把这段时间整段重算
 
 
-@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.16")
+@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.17")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -681,6 +687,7 @@ class TechDigestPlugin(Star):
                 label=label,
                 incremental=incremental,
                 gid=gid,
+                again=again,
             ),
             "",
         )
@@ -689,6 +696,26 @@ class TechDigestPlugin(Star):
         if req.gid is None:
             return "全部群"
         return self.group_name_map.get(req.gid) or f"群 {req.gid}"
+
+    def _submit_ack(self, req: DigestRequest, started: bool) -> str:
+        """给用户的受理回执：一行说清「跑哪段时间、跑哪些群、重跑还是排队」。
+
+        这句话以前是工具返回值，模型爱念就念、不念就没了——单群时念
+        「已在后台开始生成…」，说「全部群总结」时干脆沉默。同一个动作两种体验。
+        现在两个入口都由插件自己发（见 tool_group_digest / _handle_intent）。
+        """
+        if req.gid is None:
+            names = [name for _gid, name in self._submit_targets(req)]
+            who = f"{len(names)} 个群：{'、'.join(names)}"
+        else:
+            who = self._digest_target(req)
+        notes = []
+        if req.again:
+            notes.append("重跑")
+        if not started:
+            notes.append("等前面跑完")
+        tail = f"（{'、'.join(notes)}）" if notes else ""
+        return f"{'开始生成' if started else '已排队'}：{req.label}｜{who}{tail}"
 
     def _submit_targets(self, req: DigestRequest) -> list[tuple[str, str]]:
         """这次请求会产出的报告目标：单群一条，「全部群」则每个群各一条。
@@ -715,14 +742,14 @@ class TechDigestPlugin(Star):
         if not started and not self._enqueue(req):
             return False, f"已经在跑一份、后面还排着 {QUEUE_MAX} 份了，等它们跑完再叫我。"
         # 记下「这个会话在等哪几份报告」：用户回头问「跑完了吗」才有依据
-        token = req.at or time.time()
+        token = req.at or float(next(_SUBMIT_SEQ))
         for gid, name in self._submit_targets(req):
             reports.mark_generating(
                 self.state, req.umo, gid=gid, group=name, label=req.label, token=token
             )
         self._save_state()
         if not started:
-            return False, "上一份还在生成，这份已经排队，跑完接着发。"
+            return False, self._submit_ack(req, False)
         logger.info(
             f"[{PLUGIN_NAME}] 已提交生成：范围={req.label} 群={target} "
             f"增量={req.incremental}"
@@ -734,7 +761,7 @@ class TechDigestPlugin(Star):
         except Exception:
             self._running = False
             raise
-        return True, f"已在后台开始生成（范围：{req.label}，目标：{target}），报告图会直接发到聊天里。"
+        return True, self._submit_ack(req, True)
 
     def _enqueue(self, request: "DigestRequest | None") -> bool:
         """入队一份待跑的请求；队列满返回 False，调用方据此明确告知用户。"""
@@ -2714,12 +2741,15 @@ class TechDigestPlugin(Star):
         if req is None:
             return refuse
         started, message = await self._submit_digest(req)
-        if not started:
-            return message
-        # 图由本工具自己发：模型不用再说「好的我帮你生成」
-        event.set_extra("chat_intel_tool_sent", True)
         logger.info(f"[{PLUGIN_NAME}] 工具调用：原始「{when} {group}」")
-        return message + "不要再用文字复述或总结，保持沉默即可。"
+        # 回执由插件自己发，不指望模型转述：以前把这句话当工具返回值，模型念不念随缘，
+        # 于是「总结某群」有提示、「全部群总结」没提示
+        await self._send_text(event.unified_msg_origin, message)
+        if not started:
+            return "已经回复用户了，不要再输出文字。"
+        # 图也由本工具自己发：模型不用再说「好的我帮你生成」
+        event.set_extra("chat_intel_tool_sent", True)
+        return "回执已由插件发给用户，报告图也会自己发；你不要再输出任何文字。"
 
     # ------------------------------------------------------------------ 读取已有报告
     def _format_topic(self, topic: dict, detailed: bool = False, report_id: str = "") -> str:

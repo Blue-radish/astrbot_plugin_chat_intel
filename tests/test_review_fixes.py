@@ -273,8 +273,11 @@ def test_tool_still_works_for_real_digest_request():
     p._get_bot = lambda gid=None: None
     p._group_name = _noop_name
     ev = FakeEvent(gid="", text="群聊情报今天的聊了啥")
+    sent = []
+    p._send_text = lambda umo, text: sent.append(text) or asyncio.sleep(0)
     out = asyncio.run(p.tool_group_digest(ev, when="今天"))
-    assert "已在后台开始生成" in out
+    assert sent and sent[0].startswith("开始生成：今天"), sent
+    assert "不要" in out, "模型不该再念一遍回执"
 
 
 async def _noop_name(gid):
