@@ -389,7 +389,7 @@ assets/logo.typ          # logo 源文件（纯几何）
 scripts/render_assets.py # 用示例数据渲染 logo 与样张
 tests/                   # pytest：标签解析、意图判定、话题合并、渲染、采集去重
 _conf_schema.json        # WebUI 配置项定义
-docs/superpowers/        # 设计稿（spec）与实施计划（plan）
+docs/                    # 渲染样张与 logo 预览
 ```
 
 ## License

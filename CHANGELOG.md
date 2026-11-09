@@ -595,7 +595,7 @@ main.py 规模、配置负担）。这轮逐条用探针复现，七条成立；
 ## 2.0.0 — 2026-11-07
 
 **改名**：插件从 `astrbot_plugin_tech_digest`（技术情报日报）改名为 `astrbot_plugin_chat_intel`（群聊情报）。
-配置目录与数据目录随之改名，不做自动迁移，迁移步骤见 `docs/superpowers/specs/`。
+配置目录与数据目录随之改名，不做自动迁移（具体步骤见当时的本地设计稿，未随仓库发布）。
 
 - **每群一份兴趣**：配置从「一串群号」改成一张表（`chats`），一行一个群，每行有自己的
   `want`（想要的主题）/ `not_want`（不要的主题）/ `keywords` / `platform` / `title`
