@@ -175,7 +175,31 @@ class DigestRequest:
     again: bool = False  # 用户要求「重跑」：忽略增量位，把这段时间整段重算
 
 
-@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.19")
+def _scrub_gid(value, gid: str):
+    """递归抹掉 payload 里的群号：报告图会被转发，图里不能出现「哪个群」。
+
+    群名保留（那是用户自己配的标题，报告本来就要说明是谁在聊），只处理群号。
+    只替换群号本身而不是整段：整段换掉会把「在 220001 里采到 382 条」一起吃掉。
+    """
+    if not gid:
+        return value
+    if isinstance(value, str):
+        return value.replace(gid, "（群号已隐藏）") if gid in value else value
+    # 容器就地改：调用方的 payload 还是同一份对象（_render 后面还要就地改写图片列表）
+    if isinstance(value, dict):
+        for key in list(value.keys()):
+            value[key] = _scrub_gid(value[key], gid)
+        return value
+    if isinstance(value, list):
+        for i, item in enumerate(value):
+            value[i] = _scrub_gid(item, gid)
+        return value
+    if isinstance(value, tuple):
+        return tuple(_scrub_gid(item, gid) for item in value)
+    return value
+
+
+@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.20")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -2293,6 +2317,8 @@ class TechDigestPlugin(Star):
         except ImportError:
             logger.error(f"[{PLUGIN_NAME}] 未安装 typst，请 pip install typst")
             return None
+        # 出图前的关卡：报告会被人转发，图里不能出现群号
+        payload = _scrub_gid(payload, gid)
         slug = re.sub(r"[^\w\-]+", "", label) or "report"
         out = self.reports_dir / (
             f"chat_intel_{gid}_{datetime.now():%Y%m%d_%H%M%S}_{slug}.png"
@@ -2438,10 +2464,10 @@ class TechDigestPlugin(Star):
 
         now = datetime.now()
         payload = {
-            # 标题 = 群名备注（或群名）· 全局标题；副标题就只剩群号，免得群名印两遍
+            # 标题 = 群名备注（或群名）· 全局标题。图里不放群号：报告会被转发，
+            # 一张图就等于把「哪个群」交出去；群号只留在本地 JSON 与文字回复里。
             "title": self._report_title_for(chat, group_name),
             "date": now.strftime("%Y-%m-%d"),
-            "group": f"群号 {gid}",
             "stats": {
                 "line": f"{len(records)} 条消息 · {len(topics)} 个话题 · {label}",
             },

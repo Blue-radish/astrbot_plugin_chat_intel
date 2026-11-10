@@ -109,7 +109,6 @@ SHOT_CHART = """
 SCENE_FULL = {
     "title": "开发茶话会 · 群聊情报",
     "date": "2026-11-10",
-    "group": "群号 220001",
     "stats": {"line": "1286 条消息 · 4 个话题 · 今天"},
     "headline": "CI 的 lint 已跑通，接口延迟恢复；长文档测试仍只有小样本结果。",
     "topics": [
@@ -167,7 +166,6 @@ SCENE_FULL = {
 SCENE_LIGHT = {
     "title": "旧物修复小组 · 群聊情报",
     "date": "2026-11-10",
-    "group": "群号 220002",
     "stats": {"line": "212 条消息 · 2 个话题 · 最近 24 小时"},
     "headline": "386 主板仍未点亮，群友提出检查线索；另一块板子的资料正在核对。",
     "topics": [
@@ -200,7 +198,6 @@ SCENE_LIGHT = {
 SCENE_QUIET = {
     "title": "开发茶话会 · 群聊情报",
     "date": "2026-11-10",
-    "group": "群号 220001",
     "stats": {"line": "233 条消息 · 0 个话题 · 最新消息"},
     "headline": "",
     "topics": [],
@@ -210,7 +207,6 @@ SCENE_QUIET = {
 SCENE_INCOMPLETE = {
     "title": "旧物修复小组 · 群聊情报",
     "date": "2026-11-10",
-    "group": "群号 220002",
     "stats": {"line": "382 条消息 · 1 个话题 · 最近 24 小时"},
     "warn": "⚠ 第 2/3 段生成失败，本报告不完整",
     "headline": "已处理的记录中，386 主板仍在排查，尚未确认故障原因。",

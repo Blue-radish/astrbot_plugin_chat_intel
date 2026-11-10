@@ -48,7 +48,6 @@
 #h(7pt)
 #text(size: 9pt, fill: faint, d.at("date", default: ""))
 #linebreak()
-#text(size: 8.5pt, fill: sub, d.at("group", default: ""))
 #v(2pt)
 #linebreak()
 #text(size: 8pt, fill: faint, stats.at("line", default: ""))
