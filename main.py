@@ -175,11 +175,18 @@ class DigestRequest:
     again: bool = False  # 用户要求「重跑」：忽略增量位，把这段时间整段重算
 
 
+# 这些键装的是本地文件路径，不会印进报告正文。跟着一起抹会出人命：
+# 群号短的时候（测试里是「1」）路径里随手一个数字就命中，改出来的路径
+# 指向不存在的文件，_render 里 `src.is_file()` 为假就把图片静默丢掉。
+_SCRUB_SKIP_KEYS = frozenset({"path", "file", "url", "src"})
+
+
 def _scrub_gid(value, gid: str):
     """递归抹掉 payload 里的群号：报告图会被转发，图里不能出现「哪个群」。
 
     群名保留（那是用户自己配的标题，报告本来就要说明是谁在聊），只处理群号。
     只替换群号本身而不是整段：整段换掉会把「在 220001 里采到 382 条」一起吃掉。
+    文件路径类字段不碰，见 _SCRUB_SKIP_KEYS。
     """
     if not gid:
         return value
@@ -188,6 +195,8 @@ def _scrub_gid(value, gid: str):
     # 容器就地改：调用方的 payload 还是同一份对象（_render 后面还要就地改写图片列表）
     if isinstance(value, dict):
         for key in list(value.keys()):
+            if key in _SCRUB_SKIP_KEYS:
+                continue
             value[key] = _scrub_gid(value[key], gid)
         return value
     if isinstance(value, list):
@@ -222,7 +231,7 @@ def split_cfg_list(value: object) -> list[str]:
     return out
 
 
-@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.22")
+@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.23")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
