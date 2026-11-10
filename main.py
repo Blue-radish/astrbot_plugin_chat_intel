@@ -199,7 +199,30 @@ def _scrub_gid(value, gid: str):
     return value
 
 
-@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.21")
+def split_cfg_list(value: object) -> list[str]:
+    """把面板里的多值字段统一成有序、去重的字符串列表。
+
+    AstrBot 的 list 控件给的是真列表；老配置和手改的 config 文件里可能是
+    「110001,110002」「110001，110002」这种字符串。两种都要认——以前统一走
+    `str(值)` 再切分，遇上列表会切出 "['110001'" 这种脏串，账号就悄悄失效了。
+    """
+    if isinstance(value, (list, tuple, set)):
+        raw = [str(x) for x in value]
+    elif value is None:
+        raw = []
+    else:
+        raw = re.split(r"[,，、\s]+", str(value))
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        item = item.strip()
+        if item and item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
+
+
+@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.22")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -227,14 +250,9 @@ class TechDigestPlugin(Star):
         self.keep_days = self._num_cfg("keep_days", 7, lo=1)
         self.smart_parse = self._as_bool(self.config.get("smart_parse"), True)
 
-        owners = str(self.config.get("owner_uids") or "")
-        self.owner_uids = {u.strip() for u in re.split(r"[,，\s]+", owners) if u.strip()}
-
-        ignore = str(self.config.get("ignore_uids") or "")
-        self.ignore_uids = {u.strip() for u in ignore.split(",") if u.strip()}
-
-        # 静默必须显式填；读取账号现在是每群必填，不再有全局默认账号
-        self.silence_platforms = self._parse_silence(self.config)
+        # 先把老配置里的逗号串搬进 list 控件（幂等），再按最终值解析
+        self._migrate_list_fields()
+        self._apply_multi_cfg(self.config)
         self.legacy_platform_id = str(self.config.get("platform_id") or "").strip()
         self._apply_chats(self.config.get("chats"))
         self._silenced = 0
@@ -348,13 +366,52 @@ class TechDigestPlugin(Star):
     @staticmethod
     def _parse_silence(config: dict) -> list[str]:
         """解析静默名单。静默与「读历史账号」互不联动，必须显式配置。"""
+        return TechDigestPlugin._list_cfg(config, "silence_platforms")
+
+    @staticmethod
+    def _list_cfg(config: dict, key: str) -> list[str]:
+        """从配置里取一个多值字段，列表和逗号串都认。"""
+        return split_cfg_list((config or {}).get(key))
+
+    def _apply_multi_cfg(self, config: dict) -> None:
+        """三个多值字段统一入口：谁可以要报告 / 要静音的账号 / 不统计的 QQ 号。"""
+        self.owner_uids = set(self._list_cfg(config, "owner_uids"))
+        # 静默必须显式填；读取账号是每群必填，没有全局默认账号
+        self.silence_platforms = self._list_cfg(config, "silence_platforms")
+        self.ignore_uids = set(self._list_cfg(config, "ignore_uids"))
+
+    @staticmethod
+    def migrate_list_fields(config: dict) -> list[str]:
+        """把老配置里的逗号串转成真列表，返回改过的键。幂等。
+
+        面板的 list 控件只认列表：值还是字符串时那一栏会显示成空的，
+        用户会以为配置丢了。空串也要转成 []——留着空串同样是「有值但空」。
+        """
         config = config or {}
-        raw = config.get("silence_platforms") or ""
-        if isinstance(raw, str):
-            return [x.strip() for x in raw.split(",") if x.strip()]
-        if isinstance(raw, (list, tuple)):
-            return [str(x).strip() for x in raw if str(x).strip()]
-        return []
+        changed: list[str] = []
+        for key in ("owner_uids", "silence_platforms", "ignore_uids"):
+            if key not in config:
+                continue
+            value = config.get(key)
+            if isinstance(value, (list, tuple)):
+                continue
+            config[key] = split_cfg_list(value)
+            changed.append(key)
+        return changed
+
+    def _migrate_list_fields(self) -> None:
+        changed = self.migrate_list_fields(self.config)
+        if not changed:
+            return
+        if self._save_config():
+            logger.info(
+                f"[{PLUGIN_NAME}] 已把 {('、'.join(changed))} 从逗号串改成逐行填写"
+            )
+        else:
+            logger.warning(
+                f"[{PLUGIN_NAME}] {('、'.join(changed))} 的新写法没能写回配置文件，"
+                "这次重启内仍然按原值生效"
+            )
 
     @staticmethod
     def build_push_target(config: dict) -> tuple[str, str]:

@@ -63,10 +63,12 @@
     "hint": "超期的 messages/*.jsonl、images/日期目录、reports 里的旧图会被自动清掉"
   },
   "owner_uids": {
-    "type": "string",
-    "description": "谁可以要报告（必填）：填 QQ 号，多个用逗号隔开",
-    "default": "",
-    "hint": "留空时任何人都不能生成或查看报告（fail-closed），只会收到一条「去配置」的提示。注意：这里管的是谁能主动查；自动推送到哪由下面的 delivery 决定"
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "description": "谁可以要报告（必填）：一行一个 QQ 号",
+    "hint": "点下面的「添加」加一行，一行填一个 QQ 号。留空时任何人都不能生成或查看报告（fail-closed），只会收到一条「去配置」的提示。这里管的是谁能主动查；自动推送到哪由下面的 delivery 决定"
   },
   "daily_time": {
     "type": "string",
@@ -110,15 +112,20 @@
     "hint": "例如「三天以内的」这种规则认不出的说法，会额外问一次模型；关掉可省一次调用"
   },
   "silence_platforms": {
-    "type": "string",
-    "description": "要静音的账号（一般不用填）：这些账号在任何群、任何私聊都不开口",
-    "default": "",
-    "hint": "留空 = 不静音任何账号（每群的「读取账号」不会自动静音）。填了会让这个账号对**所有**插件都闭嘴，包括别的插件的回复，确认清楚再填"
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "description": "要静音的账号（一般不用填）：一行一个平台实例 id",
+    "hint": "留空 = 不静音任何账号（每群的「读取账号」不会自动静音）。填了会让这个账号对所有插件都闭嘴，包括别的插件的回复，确认清楚再填"
   },
   "ignore_uids": {
-    "type": "string",
-    "description": "不统计的 QQ 号，逗号分隔（一般填机器人自己）",
-    "default": ""
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "description": "不统计的 QQ 号，一行一个（一般填机器人自己）",
+    "hint": "这些号发的消息不进报告。点「添加」加一行"
   },
   "max_messages": {
     "type": "int",
