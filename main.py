@@ -199,7 +199,7 @@ def _scrub_gid(value, gid: str):
     return value
 
 
-@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.20")
+@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.21")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -1655,6 +1655,24 @@ class TechDigestPlugin(Star):
         logger.info(f"[{PLUGIN_NAME}] 命令兜底解析「{text}」→ {data}")
         return str(data.get("date") or "").strip(), str(data.get("group") or "").strip()
 
+    def _mark_read(self, gid: str, until: float, incomplete: bool) -> bool:
+        """把「已读边界」推到这次报告覆盖的结尾，只进不退。
+
+        以前只在增量跑法里推进，于是定时报告和「总结今天的」这类范围报告
+        （incremental=False）跑完之后边界不动，下一次「最新消息」仍从很旧的
+        游标开始，把早就看过、早就总结过的内容又总结一遍。
+        """
+        if incomplete:
+            # 有分段失败，那一段没读到，不能算已读，下一轮还要补
+            return False
+        marked = int(min(float(until), time.time()))
+        state = self._group_state(gid)
+        current = int(float(state.get("last_ts") or 0))
+        if marked <= current:
+            return False
+        state["last_ts"] = marked
+        return True
+
     def _resolve_since(self, gid: str, since: float, incremental: bool, until: float) -> float:
         if not incremental:
             return since
@@ -2416,6 +2434,9 @@ class TechDigestPlugin(Star):
         records = records[-self.max_messages :]
 
         if not records:
+            if incremental:
+                # 刚跑完报告又问「最新」时，说「最新消息没有消息」很别扭
+                return None, f"{group_name}：自上次报告以来没有新消息", False
             return None, f"{group_name}：{label}没有消息", False
 
         name_map = build_name_map([rec.get("name") for rec in records])
@@ -2454,8 +2475,7 @@ class TechDigestPlugin(Star):
         topics = self._describe_topics(data.get("topics") or [], records, name_map)
         if not topics:
             # 完整跑完但一条都没命中：也要把游标推上去，否则「看最新」每次都会重跑同一批消息
-            if incremental and not incomplete:
-                self._group_state(gid)["last_ts"] = int(until)
+            if self._mark_read(gid, until, incomplete):
                 self._save_state()
             return None, f"{group_name}：{label}没有命中标签的话题", False
 
@@ -2519,9 +2539,9 @@ class TechDigestPlugin(Star):
         if umo:
             reports.resolve(self.state, umo, record, stored=stored)
 
-        # 只有完整跑完才推进增量游标，否则漏掉的内容下一轮还能补回来
-        if incremental and not incomplete:
-            self._group_state(gid)["last_ts"] = int(until)
+        # 只有完整跑完才推进已读边界，否则漏掉的内容下一轮还能补回来。
+        # 定时报告和范围报告同样推进：用户说的「已读」就是「出过报告」。
+        self._mark_read(gid, until, incomplete)
         self._group_state(gid)["last_report"] = path.name
         self._group_state(gid)["last_report_ts"] = int(now.timestamp())
         self._group_state(gid)["last_range"] = label
