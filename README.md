@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.png" width="132" alt="群聊情报">
+  <img src="docs/logo.png" width="132" alt="群聊情报 Q 版角色 Logo">
 </p>
 
 <h1 align="center">群聊情报（astrbot_plugin_chat_intel）</h1>

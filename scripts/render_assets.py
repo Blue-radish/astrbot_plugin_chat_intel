@@ -1,4 +1,4 @@
-"""渲染 logo 与 README 样张（离线，不需要 AstrBot / 不需要模型）。
+"""Copy the plugin logo and render README samples offline.
 
     python scripts/render_assets.py --fonts ./fonts
     python scripts/render_assets.py --fonts ./fonts --scene light
@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT))
 from interest import split_names  # noqa: E402  与插件用同一套「群友 ID」切分
 from imaging import compose_tall_image, plan_image_file  # noqa: E402  与插件共用同一套图片排版
 TEMPLATE = ROOT / "templates" / "report.typ"
-LOGO = ROOT / "assets" / "logo.typ"
+LOGO = ROOT / "logo.png"
 
 FOOTER = "生成于 2026-11-10 23:30 · astrbot_plugin_chat_intel · 虚构演示 · 本报告不会发到群里"
 
@@ -290,11 +290,14 @@ def render_report(scene: str, out: Path, fonts: str, ppi: int) -> None:
         shutil.rmtree(job, ignore_errors=True)
 
 
-def render_logo(out: Path, fonts: str) -> None:
-    kwargs = {"font_paths": [fonts]} if fonts else {}
-    typst.compile(
-        str(LOGO), output=str(out), root=str(ROOT), format="png", ppi=144, **kwargs
-    )
+def render_logo(out: Path) -> None:
+    """Copy the canonical plugin logo to the documentation output.
+
+    Args:
+        out: Destination PNG path.
+    """
+    if LOGO.resolve() != out.resolve():
+        shutil.copyfile(LOGO, out)
 
 
 def main() -> None:
@@ -313,7 +316,7 @@ def main() -> None:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     if args.scene in ("all", "logo"):
-        render_logo(out_dir / "logo.png", args.fonts)
+        render_logo(out_dir / "logo.png")
         print(f"  logo      -> {out_dir / 'logo.png'}")
     targets = list(SCENES.keys()) if args.scene == "all" else [args.scene]
     for scene in targets:
