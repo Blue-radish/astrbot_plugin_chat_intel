@@ -101,8 +101,10 @@ def test_outline_reports_ref_counts(tmp_path):
     out = p._format_report(record)
     assert "来源引用 3 条" in out
     assert "来源引用 1 条" in out
-    assert "共 4 条" in out, "结尾要告诉它一共几条，可以一次取全"
-    assert "一次调用就能拿全" in out
+    assert "共 4 条" in out, "结尾要告诉它一共几条引用"
+    assert "按返回的 offset 翻页" in out
+    assert "每页最多 20 条命中" in out
+    assert "一次调用就能拿全" not in out
 
 
 def test_outline_without_refs_says_so(tmp_path):

@@ -62,7 +62,12 @@ def test_prompt_splits_generate_discuss_verify(tmp_path):
     assert "get_group_report" in text
     assert "query_group_records" in text
     assert "不要重新生成" in text, "讨论报告时不该再生成一份"
-    assert "除 group_digest 外" in text, "只有生成工具才要求沉默"
+    assert "group_digest、cancel_digest" in text
+    assert "get_group_report、query_group_records 返回后正常回答" in text
+    assert "清空 msg_ids 并改用关键词" in text
+    assert "显式传 when 扩大时间范围" in text
+    assert "按结果给出的 offset" in text
+    assert "不要取消" in text
 
 
 def test_prompt_says_to_separate_summary_from_evidence(tmp_path):
