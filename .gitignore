@@ -1,23 +1,24 @@
+# Python and test artifacts
 __pycache__/
 *.py[cod]
 *.egg-info/
+.pytest_cache/
 .venv/
 venv/
 
-# 本地渲染色样（脚本产物）
-preview.png
-docs/preview*.png
-
-# 运行期数据（插件数据目录在 AstrBot 那边，这里只是双保险）
+# Runtime data
 data/
 reports/
 messages/
 *.log
+*.wav
 
-# 编辑器
+# Local previews and agent work
+preview.png
+docs/preview*.png
+.superpowers/
+
+# Editors and operating systems
 .vscode/
 .idea/
 .DS_Store
-
-# superpowers 工作区（ledger / briefs / 评审包）
-.superpowers/

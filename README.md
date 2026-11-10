@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.png" width="132" alt="群聊情报 Q 版角色 Logo">
+  <img src="docs/logo.png" width="200" height="200" alt="群聊情报 Q 版角色 Logo">
 </p>
 
 <h1 align="center">群聊情报（astrbot_plugin_chat_intel）</h1>
@@ -9,25 +9,6 @@
 适用于 AstrBot + OneBot v11。机器人加入目标群并持续在线，插件累积收到的消息。
 你为每个群填写关心的标签，模型按实际讨论整理话题，再由本地 Typst 排版成图。
 报告仅在私聊投递，手动使用权限由 `owner_uids` 控制。
-
-## 样张
-
-以下内容、群名与成员均为虚构演示，使用当前报告模板与图片排版逻辑生成。
-
-**多话题报告**包含标题、兴趣标签、讨论时间、参与人、正文和对应配图。标题只写群名（或你配的群名备注），**图里不印群号**——报告图常被转发，一张图就等于把「哪个群」交出去；群号只保留在本地报告 JSON 和文字回复里。
-
-<img src="docs/sample-full.png" width="700" alt="多话题报告示例，展示讨论经过、证据图片与尚未验证的建议">
-
-**较短的报告**按实际信息量组织内容，保留尚未解决的问题。
-
-<img src="docs/sample-light.png" width="700" alt="复古硬件群的短报告示例">
-
-**部分生成失败的报告**会在顶部提示缺失的分段。
-
-<img src="docs/sample-incomplete.png" width="700" alt="带有分段生成失败提示的不完整报告示例">
-
-没有消息、只有图片和表情，或没有命中标签时，手动请求会收到文字说明，该群不生成报告图。
-定时任务遇到无内容时仅记录日志。
 
 ## 安装与首次使用
 
@@ -160,6 +141,25 @@ Windows / macOS 可使用系统已有的中文字体；缺字体的环境可将 
 忙碌时最多再排两份请求，队列满时会明确拒绝。
 取消针对当前会话的手动请求，包含该会话的排队请求。当前版本的取消边界见下方「已知限制」。
 
+### 报告样张
+
+以下内容、群名与成员均为虚构演示，使用当前报告模板与图片排版逻辑生成。
+
+**多话题报告**包含标题、兴趣标签、讨论时间、参与人、正文和对应配图。标题只写群名（或你配的群名备注），**图里不印群号**——报告图常被转发，一张图就等于把「哪个群」交出去；群号只保留在本地报告 JSON 和文字回复里。
+
+<img src="docs/sample-full.png" width="700" alt="多话题报告示例，展示讨论经过、证据图片与尚未验证的建议">
+
+**较短的报告**按实际信息量组织内容，保留尚未解决的问题。
+
+<img src="docs/sample-light.png" width="700" alt="复古硬件群的短报告示例">
+
+**部分生成失败的报告**会在顶部提示缺失的分段。
+
+<img src="docs/sample-incomplete.png" width="700" alt="带有分段生成失败提示的不完整报告示例">
+
+没有消息、只有图片和表情，或没有命中标签时，手动请求会收到文字说明，该群不生成报告图。
+定时任务遇到无内容时仅记录日志。
+
 ### 发完报告还能讨论什么
 
 每份报告同时保存图片和 JSON 正文。模型可以读正文、查引用、按关键词浏览已采集的消息。
@@ -229,6 +229,23 @@ data/plugin_data/astrbot_plugin_chat_intel/
 - 旧版本只有图片的报告无法直接读取正文，需要重新生成后才能讨论细节。
 - 模型可能遗漏或误解内容，关键结论可通过原始消息查询核对。
 
+## 目录结构
+
+```text
+main.py             # 插件入口与功能实现
+metadata.yaml       # 插件名称、版本和兼容信息
+_conf_schema.json   # WebUI 配置项
+logo.png            # AstrBot 图标，256×256
+README.md           # 安装、配置与使用
+CHANGELOG.md        # 版本变更
+docs/               # README 图片，logo 为 200×200
+scripts/            # 资源维护脚本
+tests/              # 离线测试
+```
+
+群聊总结另有 `interest.py`、`intent.py`、`imaging.py`、`reports.py`，分别处理兴趣、意图、配图和报告存档。
+`templates/` 保存报告模板。
+
 ## 开发
 
 在装有 AstrBot 项目依赖、pytest 和插件依赖的 Python 环境中运行测试，测试使用伪事件与伪模型。
@@ -245,8 +262,14 @@ python scripts/render_assets.py --fonts <字体目录> --scene light
 python scripts/render_assets.py --fonts <字体目录> --scene incomplete
 ```
 
-核心文件包括 `main.py`（采集、生成与工具）、`interest.py`（兴趣与总结规则）、`intent.py`（意图规则）、
-`imaging.py`（图片排版）、`reports.py`（存档与索引）、`templates/report.typ`（报告模板）。
+更新图标时，在装有 Pillow 的开发环境中运行以下命令。
+
+```bash
+python scripts/sync_logo.py --source <原始透明PNG>
+```
+
+脚本生成根目录的 256×256 插件图标和 `docs/logo.png` 的 200×200 README 小图。
+README 以 200px 显示。两张图使用同一设计，按用途保存不同尺寸。
 
 ## License
 

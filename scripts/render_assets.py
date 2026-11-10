@@ -13,6 +13,8 @@ from pathlib import Path
 
 import typst
 
+from sync_logo import sync_logo
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 
@@ -296,8 +298,7 @@ def render_logo(out: Path) -> None:
     Args:
         out: Destination PNG path.
     """
-    if LOGO.resolve() != out.resolve():
-        shutil.copyfile(LOGO, out)
+    sync_logo(LOGO, out.parent)
 
 
 def main() -> None:
