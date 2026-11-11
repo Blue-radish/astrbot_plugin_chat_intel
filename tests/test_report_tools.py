@@ -220,13 +220,16 @@ def test_query_by_message_ids(tmp_path):
 
 
 def test_query_by_ref_works_for_legacy_rows(tmp_path):
-    """按 ref（发送者@时间）也要能查到没有 mid 的旧消息。"""
+    """按 ref（发送者@时间）也要能查到没有 mid 的旧消息。
+
+    时间基准必须落在「今天」窗口里：直接写 `time.time() - 900`，在 0 点到 0 点 15 分
+    之间会掉到昨天，`when="今天"` 自然查不到——不是代码坏了，是基准歪了。
+    """
+    base = today_base(count=2, step=100)
     rows = [
-        {"gid": GID, "t": int(time.time()) - 900, "uid": "u7", "name": "老张", "text": "板子烧了"},
-        {"gid": GID, "t": int(time.time()) - 800, "uid": "u8", "name": "老王", "text": "换一片"},
+        {"gid": GID, "t": base, "uid": "u7", "name": "老张", "text": "板子烧了"},
+        {"gid": GID, "t": base + 100, "uid": "u8", "name": "老王", "text": "换一片"},
     ]
-    for index, row in enumerate(rows):
-        rows[index] = row
     p = make_query_plugin(tmp_path, rows)
     ref = f"u7@{rows[0]['t']}"
     out = call(p, lambda: p.tool_query_records(Ev(), when="今天", msg_ids=ref))

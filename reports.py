@@ -22,6 +22,10 @@ from pathlib import Path
 
 SCHEMA_VERSION = 2          # 2：去掉原文快照，只留引用
 INDEX_KEEP = 3              # 每个会话记住最近几份报告
+DELIVERY_KEEP = 5           # 每个会话记住最近几次「成功投递」
+
+# 投递记录只按条数封顶，**不加时间 TTL**：归档还留着、投递事实却先过期，
+# 会让用户隔天问「上周那份」时模型无从判断「我到底发没发过」。条数已经够控体积。
 
 
 def report_id_from_image(image_name: str) -> str:
@@ -233,12 +237,22 @@ def prune(report_dir, keep_days: int, protect: set[str] | None = None) -> tuple[
 
 
 def _conv(state: dict, umo: str) -> dict:
+    """取（必要时创建）会话节点。**只给写路径用**。"""
     conversations = state.setdefault("conversations", {})
     return conversations.setdefault(umo or "", {})
 
 
+def _conv_ro(state: dict, umo: str) -> dict:
+    """只读取会话节点，不创建任何键。
+
+    渲染提示词走的是只读路径：以前 `_conv()` 用 `setdefault`，于是「看一眼快照」
+    就会在空 state 上凭空建出 `conversations[umo]`，把纯渲染变成写操作。
+    """
+    return ((state or {}).get("conversations") or {}).get(umo or "") or {}
+
+
 def entries(state: dict, umo: str) -> list[dict]:
-    return list(_conv(state, umo).get("reports") or [])
+    return list(_conv_ro(state, umo).get("reports") or [])
 
 
 def _store(state: dict, umo: str, items: list[dict]) -> None:
@@ -459,7 +473,7 @@ def set_focus(state: dict, umo: str, report_id: str, topic_no: int = 0) -> None:
 
 
 def get_focus(state: dict, umo: str) -> dict:
-    focus = _conv(state, umo).get("focus")
+    focus = _conv_ro(state, umo).get("focus")
     return focus if isinstance(focus, dict) else {}
 
 
@@ -529,3 +543,148 @@ def blurb(state: dict, umo: str, limit: int = INDEX_KEEP) -> str:
         )
     text = "[已有报告] " + "；".join(lines)
     return (focus_line + text) if focus_line else text
+
+
+# ---------------------------------------------------------------- 投递记录
+#
+# 「有哪些报告」和「我发过哪几份」是两件事：
+# - 索引（`reports`）按 INDEX_KEEP 裁，服务于「找报告」；
+# - 投递记录（`deliveries`）按 DELIVERY_KEEP 裁，服务于「我刚才发了什么」。
+#
+# 分开的理由很实在：四群一次生成时，第一份生成完就已经被挤出最近三份，
+# `mark_delivered()` 找不到它，可图片是真发出去了。投递事实若挂在索引上就会丢。
+# 而模型一旦没有「我一分钟前发过这份」的依据，就会把用户的夸奖当成新请求重跑一遍。
+
+
+def deliveries(state: dict, umo: str) -> list[dict]:
+    """本会话的成功投递记录（只读，不创建会话键）。"""
+    return [d for d in (_conv_ro(state, umo).get("deliveries") or []) if isinstance(d, dict)]
+
+
+def append_delivery(
+    state: dict,
+    umo: str,
+    *,
+    report_id: str,
+    group: str = "",
+    range_label: str = "",
+    topic_count: int | None = None,
+    topic_titles=None,
+    stored: bool | None = None,
+    delivered_at: float | None = None,
+) -> dict:
+    """记一次「图真的发出去了」。
+
+    `stored` 是**投递当时**的存档结果，三态：True 存下了 / False 没存下 / None 不知道。
+    别把 None 写成 False：那等于把「我没查到」当成「当时失败了」，是凭空造事实。
+    `topic_count` 同理，不知道就留 None，不要写 0。
+    """
+    log = _conv(state, umo).setdefault("deliveries", [])
+    if not isinstance(log, list):
+        log = []
+        _conv(state, umo)["deliveries"] = log
+    seq = (int(log[-1].get("seq") or 0) + 1) if log and isinstance(log[-1], dict) else 1
+    record = {
+        "seq": seq,
+        "report_id": str(report_id or ""),
+        "delivered_at": int(delivered_at if delivered_at is not None else time.time()),
+        "group": str(group or ""),
+        "range_label": str(range_label or ""),
+        "topic_count": int(topic_count) if isinstance(topic_count, int) else None,
+        "topic_titles": [str(t) for t in (topic_titles or []) if t],
+        "stored": stored if isinstance(stored, bool) else None,
+    }
+    log.append(record)
+    if len(log) > DELIVERY_KEEP:
+        del log[:-DELIVERY_KEEP]
+    return record
+
+
+def stored_from_index(state: dict, umo: str, report_id: str) -> bool | None:
+    """索引里还留着这份时，补出「当时存档结果」；只剩老数据就返回 None。
+
+    不做 `_facts()` 的默认值推断：老条目没有 `stored` 字段时，`_facts()` 会默认 True，
+    拿它当真就是把「不知道」说成「存档成功」。
+    """
+    if not report_id:
+        return None
+    for entry in entries(state, umo):
+        if str(entry.get("id") or "") != str(report_id):
+            continue
+        if "stored" in entry:
+            return bool(entry.get("stored"))
+        return None
+    return None
+
+
+def _fmt_delivered_at(ts) -> str:
+    """本地时间 + 时区标识；拿不到时间就明说不知道，不拿别的字段顶替。"""
+    try:
+        value = int(ts)
+    except (TypeError, ValueError):
+        return "时间未知"
+    if value <= 0:
+        return "时间未知"
+    moment = datetime.fromtimestamp(value)
+    offset = moment.astimezone().utcoffset() or timedelta(0)
+    hours = int(offset.total_seconds() // 3600)
+    sign = "+" if hours >= 0 else "-"
+    return f"{moment:%Y-%m-%d %H:%M}（UTC{sign}{abs(hours)}）"
+
+
+def _body_state(state: dict, umo: str, record: dict, report_dir) -> str:
+    """正文现在能不能读：文件在不在是**当前**事实，`stored` 是**当时**的记录，分开说。
+
+    `path.exists()` 不够（可能是目录），`is_file()` 只是「可尝试读取」，
+    真正能不能解析由 `load()` 说了算——所以这里的措辞只到「文件存在，可调用工具读取」。
+    """
+    report_id = str(record.get("report_id") or "")
+    path = path_for(report_dir, report_id)
+    if path is not None and path.is_file():
+        return "正文文件存在，可调用 get_group_report 读取"
+    stored = record.get("stored")
+    if not isinstance(stored, bool):
+        stored = stored_from_index(state, umo, report_id)
+    if stored is True:
+        return "当时存档成功，当前正文文件缺失"
+    if stored is False:
+        return "当时存档失败，当前正文文件缺失"
+    return "当前正文文件缺失，当时存档状态未知"
+
+
+def delivery_blurb(
+    state: dict, umo: str, report_dir, limit: int = DELIVERY_KEEP
+) -> str:
+    """注入提示词的一段事实快照：这个会话最近**真的收到过**哪些报告图、什么时候发的。
+
+    和 `blurb()` 分工：`blurb()` 说「有哪些报告、正在讨论哪份」，这里说「我发过哪几份」。
+    两者会同时出现，所以措辞上必须能分开——否则同一个「这条」会有两个指向。
+
+    纯只读：不建会话键、不改 state，模型每轮请求都会调它。
+    """
+    items = deliveries(state, umo)[-limit:]
+    if not items:
+        return ""
+    lines = [
+        "[本会话最近的报告投递]",
+        "以下是**你自己**通过群聊情报插件发到本会话的报告图（不是用户发的），"
+        "只说明「已发送到本会话」，不代表用户已读。",
+    ]
+    for index, record in enumerate(items, 1):
+        report_id = str(record.get("report_id") or "")
+        group = str(record.get("group") or "") or "（群名未知）"
+        label = str(record.get("range_label") or "") or "（范围未知）"
+        count = record.get("topic_count")
+        titles = [str(t) for t in (record.get("topic_titles") or []) if t]
+        if isinstance(count, int):
+            topic_text = f"共 {count} 个话题"
+            if titles:
+                topic_text += f"（{'、'.join(titles[:4])}）"
+        else:
+            topic_text = "话题数未知"
+        lines.append(
+            f"{index}) {_fmt_delivered_at(record.get('delivered_at'))}｜{group}｜{label}｜"
+            f"报告 ID={report_id or '（未知）'}｜{topic_text}｜"
+            f"{_body_state(state, umo, record, report_dir)}"
+        )
+    return "\n".join(lines)

@@ -51,7 +51,8 @@ def test_run_daily_once_pushes_report_image():
     async def fake_generate_all(*_a, **_k):
         return [("1", __import__("pathlib").Path("x.png"), "ok", False)]
 
-    async def fake_deliver(umo, path):
+    async def fake_deliver(umo, path, **_kw):
+        # 定时档会把群号/范围一起带下来，作为归档缺失时的元数据兜底
         delivered.append(path)
         return True
 

@@ -407,8 +407,13 @@ def test_manual_send_failure_keeps_generated_status(tmp_path):
     assert [reports.status_of(e) for e in reports.entries(p.state, UMO)] == ["generated"]
 
 
-def test_delivery_moves_focus_to_the_new_report(tmp_path):
-    """刚收到的那份才是「第二条」的指代对象；要聊旧的得显式引用。"""
+def test_delivery_does_not_steal_the_discussion_focus(tmp_path):
+    """后台又发来一份，不能把正在讨论的那份挤掉。
+
+    以前投递成功就把焦点切到新报告：用户正在聊 A，定时报告 B 到点发来，
+    「第二条呢」立刻指向 B，两块提示（投递记录、正在讨论）还都写着 B，
+    模型连「刚才在聊 A」的依据都没有了。现在投递只记事实，焦点由读取建立。
+    """
     p = make(tmp_path)
     hold = build_report(
         tmp_path, "oldOne", [], "上午", ["旧话题"], time.time() - 7200, time.time() - 3600
@@ -421,12 +426,39 @@ def test_delivery_moves_focus_to_the_new_report(tmp_path):
     )
     reports.resolve(p.state, UMO, fresh)
 
-    asyncio.run(p._deliver_report(UMO, tmp_path / "reports" / "newOne.png"))
+    assert asyncio.run(p._deliver_report(UMO, tmp_path / "reports" / "newOne.png")) is True
 
     focus = reports.get_focus(p.state, UMO)
-    assert focus.get("report_id") == "newOne", "焦点没跟着新报告走"
-    assert focus.get("topic_no") == 0, "整份新报告，不指定话题"
+    assert focus.get("report_id") == "oldOne", "投递不该动已经在讨论的那份"
+    assert focus.get("topic_no") == 2, "话题号也要原样保留"
     assert reports.status_of(reports.entries(p.state, UMO)[-1]) == "delivered"
+
+    # 但「我发过什么」必须记下来，模型下一轮才有「刚发过」的依据
+    shipped = reports.deliveries(p.state, UMO)
+    assert [d["report_id"] for d in shipped] == ["newOne"]
+    assert shipped[-1]["stored"] is True
+
+
+def test_focus_absent_falls_back_to_latest_delivery(tmp_path):
+    """没有焦点时，「刚发来的那份」按投递记录选，而不是按索引猜。"""
+    p = make(tmp_path)
+    older = build_report(
+        tmp_path, "older", [], "上午", ["旧话题"], time.time() - 7200, time.time() - 3600
+    )
+    reports.resolve(p.state, UMO, older)
+    newer = build_report(
+        tmp_path, "newer", [], "刚才", ["新话题"], time.time() - 600, time.time()
+    )
+    reports.resolve(p.state, UMO, newer)
+    # 把索引顺序打成「older 在最后」，只有投递记录能指向 newer
+    conv = p.state["conversations"][UMO]
+    conv["reports"] = [e for e in conv["reports"] if e.get("id") == "newer"] + [
+        e for e in conv["reports"] if e.get("id") == "older"
+    ]
+    reports.append_delivery(p.state, UMO, report_id="newer", group="群", range_label="刚才")
+
+    rid, _why = p._pick_report(UMO, "", "")
+    assert rid == "newer", "无焦点时应优先最近成功投递的那份"
 
 
 def test_failed_delivery_keeps_the_old_focus(tmp_path):

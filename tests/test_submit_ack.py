@@ -20,6 +20,7 @@ def fresh(**attrs):
 
     async def send_text(umo, text):
         sent.append(text)
+        return True  # 真实 _send_text 现在会回报发送结果，这里模拟「发出去了」
 
     p, mod = make_plugin(
         chats=[

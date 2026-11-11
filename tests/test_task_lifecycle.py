@@ -43,8 +43,8 @@ def test_submitted_task_is_held_then_released():
     p._generate_and_send = quick
 
     async def scenario():
-        started, _msg = await p._submit_digest(_request(mod))
-        assert started is True
+        status, _msg = await p._submit_digest(_request(mod))
+        assert status == "accepted"
         assert len(p._tasks) == 1, "提交后必须有一个被持有的任务"
         await asyncio.wait_for(done.wait(), 2)
         await asyncio.sleep(0)  # 让 done_callback 跑完

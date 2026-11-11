@@ -51,17 +51,17 @@ def test_rejected_request_leaves_no_placeholder():
     p._queue.append(mod.DigestRequest(UMO, 0, 1, "今天", False, GID))
     p._queue.append(mod.DigestRequest(UMO, 0, 1, "今天", False, GID2))
 
-    ok, msg = asyncio.run(p._submit_digest(mod.DigestRequest(UMO, 0, 1, "今天", False, GID)))
+    status, msg = asyncio.run(p._submit_digest(mod.DigestRequest(UMO, 0, 1, "今天", False, GID)))
 
-    assert ok is False and "排着" in msg
+    assert status == "rejected" and "排着" in msg
     assert generating(p) == [], "没受理就别登记"
 
 
 def test_queued_request_is_still_shown_as_in_progress():
     """排队了但确实受理了：这时候登记「正在生成」是对的。"""
     p, mod = fresh(_running=True)
-    ok, msg = asyncio.run(p._submit_digest(mod.DigestRequest(UMO, 0, 1, "今天", False, GID)))
-    assert ok is False and "排队" in msg
+    status, msg = asyncio.run(p._submit_digest(mod.DigestRequest(UMO, 0, 1, "今天", False, GID)))
+    assert status == "queued" and "排队" in msg, "排队和拒绝必须能分开，不能都返回同一件事"
     assert [e["gid"] for e in generating(p)] == [GID]
 
 

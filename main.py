@@ -231,7 +231,7 @@ def split_cfg_list(value: object) -> list[str]:
     return out
 
 
-@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.23")
+@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.24")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -695,11 +695,18 @@ class TechDigestPlugin(Star):
         gid, _group_txt = self._match_group(text)
         return bool(rng or gid)
 
-    async def _send_text(self, umo: str, text: str) -> None:
+    async def _send_text(self, umo: str, text: str) -> bool:
+        """发一段文字，**返回到底发没发出去**。
+
+        以前只 return None + 打日志，调用方把「我调过这个函数」当成「用户收到了」，
+        于是回执发失败时模型还被要求闭嘴，用户最后什么都收不到。
+        """
         try:
-            await self.context.send_message(umo, MessageChain().message(text))
+            ok = await self.context.send_message(umo, MessageChain().message(text))
         except Exception as e:
             logger.warning(f"[{PLUGIN_NAME}] 文本发送失败: {e}")
+            return False
+        return ok is not False
 
 
     async def cancel_digest(self, umo: str) -> str:
@@ -777,7 +784,7 @@ class TechDigestPlugin(Star):
             f"[{PLUGIN_NAME}] 直通 {intent.kind}：范围={req.label} 增量={req.incremental} "
             f"群={req.gid or '全部'} 命中「{intent.anchor}+{intent.action}」原文「{text}」"
         )
-        _started, message = await self._submit_digest(req)
+        _status, message = await self._submit_digest(req)
         await self._send_text(umo, message)
 
     # ------------------------------------------------------------------ 两个入口共用
@@ -870,10 +877,17 @@ class TechDigestPlugin(Star):
             gids = list(self.group_ids)
         return [(gid, self.group_name_map.get(gid) or f"群 {gid}") for gid in gids]
 
-    async def _submit_digest(self, req: DigestRequest) -> tuple[bool, str]:
+    async def _submit_digest(self, req: DigestRequest) -> tuple[str, str]:
         """两个入口共用的提交：抢执行位/排队 → 登记占位 → 后台跑。
 
-        返回 (是否真的开始跑了, 回给用户的话)。
+        返回 (受理结果, 回给用户的话)。结果只有三种：
+        - `accepted`：真的开跑了
+        - `queued`：受理了，排在后面等
+        - `rejected`：队列也满了，没受理（一条占位都不登记）
+
+        以前返回 (bool, str)，`False` 同时表示「排队」和「拒绝」，
+        调用方只能靠文案猜，占位和回执都可能记错。
+
         **先判断受理、再登记**：以前反过来，队列满被拒时索引里会留下一条永远跑不完的
         「正在生成」，用户问「跑完了吗」就被骗；两个入口以前对占位处理也不一致，
         自然语言那条根本没记，于是回头问也查不到。
@@ -881,7 +895,7 @@ class TechDigestPlugin(Star):
         target = self._digest_target(req)
         started = self._claim()
         if not started and not self._enqueue(req):
-            return False, f"已经在跑一份、后面还排着 {QUEUE_MAX} 份了，等它们跑完再叫我。"
+            return "rejected", f"已经在跑一份、后面还排着 {QUEUE_MAX} 份了，等它们跑完再叫我。"
         # 记下「这个会话在等哪几份报告」：用户回头问「跑完了吗」才有依据
         token = req.at or float(next(_SUBMIT_SEQ))
         for gid, name in self._submit_targets(req):
@@ -890,7 +904,7 @@ class TechDigestPlugin(Star):
             )
         self._save_state()
         if not started:
-            return False, self._submit_ack(req, False)
+            return "queued", self._submit_ack(req, False)
         logger.info(
             f"[{PLUGIN_NAME}] 已提交生成：范围={req.label} 群={target} "
             f"增量={req.incremental}"
@@ -903,7 +917,7 @@ class TechDigestPlugin(Star):
         except Exception:
             self._running = False
             raise
-        return True, self._submit_ack(req, True)
+        return "accepted", self._submit_ack(req, True)
 
     def _enqueue(self, request: "DigestRequest | None") -> bool:
         """入队一份待跑的请求；队列满返回 False，调用方据此明确告知用户。"""
@@ -1094,6 +1108,21 @@ class TechDigestPlugin(Star):
                 blurb = reports.blurb(self.state, event.unified_msg_origin)
                 if blurb:
                     hint += "\n" + blurb
+                shipped = reports.delivery_blurb(
+                    self.state, event.unified_msg_origin, self.reports_dir
+                )
+                if shipped:
+                    hint += "\n" + shipped
+                    hint += (
+                        "\n指代规则：「刚发来的」「刚才那份」「新发的那份」→ 看"
+                        "「本会话最近的报告投递」第 1 条，把它的报告 ID 传给读取工具；"
+                        "「这条」「第二条」「这个结论」「他原话」→ 用「正在讨论」的焦点那份。"
+                        "两者指向不同报告时按用户措辞选；都没线索就先按焦点回答，"
+                        "并点明另有一份刚发出的报告可供切换。"
+                        "多份都符合描述而无法确定时，把报告 ID、群名、范围列给用户选，"
+                        "不要静默挑一份。投递记录只说明图已发送到本会话，"
+                        "不能据此说用户已读、已认同或已被告知内容。"
+                    )
                 req.system_prompt = (req.system_prompt or "") + hint
             return False
         self._llm_blocked += 1
@@ -2698,16 +2727,26 @@ class TechDigestPlugin(Star):
             return False
         return True
 
-    async def _deliver_report(self, umo: str, path: Path) -> bool:
-        """投递一份报告图，并把「到底发没发出去」写回索引。
+    async def _deliver_report(
+        self, umo: str, path: Path, *, gid: str = "", range_label: str = ""
+    ) -> bool:
+        """投递一份报告图，并把「到底发没发出去」写回索引和投递记录。
 
         手动、定时、重发都走这里：以前三处各写一遍发送 + 更新状态，
         改一处就漏两处，状态和现实对不上就是从这儿来的。
+
+        **不抢讨论焦点**：投递只记「我发了什么」，焦点由读取成功（get_group_report）
+        来建立。否则正在讨论 A 时后台发来 B，焦点被切走，「第二条」就指着另一份了。
+
+        `gid` / `range_label` 只是兜底线索：正常路径的元数据从报告 JSON 归档里取，
+        归档写失败时（stored=False）才用得上这两个参数。
         """
         if not umo:
             logger.warning(f"[{PLUGIN_NAME}] 没有收件会话，发不出 {path.name}")
             return False
         rid = reports.report_id_from_image(path.name)
+        # 归档和索引是两套生命周期：索引被 INDEX_KEEP 裁掉不影响这里取元数据
+        record = reports.load(self.reports_dir, rid)
         try:
             ok = await self.context.send_message(
                 umo, MessageChain([AstrImage.fromFileSystem(str(path))])
@@ -2721,9 +2760,23 @@ class TechDigestPlugin(Star):
         else:
             logger.info(f"[{PLUGIN_NAME}] 已投递 {path.name} -> {umo}")
             reports.mark_delivered(self.state, umo, rid)
-            # 焦点跟着最新投递走：用户刚收到这份，下一句「第二条」「他原话」指的就是它。
-            # 想接着聊旧报告就显式引用旧报告（ID 或话题），别靠含糊指代。
-            reports.set_focus(self.state, umo, rid, 0)
+            topics = (record or {}).get("topics") or []
+            reports.append_delivery(
+                self.state,
+                umo,
+                report_id=rid,
+                group=str(
+                    (record or {}).get("group")
+                    or (self.group_name_map.get(gid) if gid else "")
+                    or ""
+                ),
+                range_label=str(
+                    ((record or {}).get("range") or {}).get("label") or range_label or ""
+                ),
+                topic_count=len(topics) if record is not None else None,
+                topic_titles=[str(t.get("title") or "") for t in topics if isinstance(t, dict)],
+                stored=True if record is not None else None,
+            )
         self._save_state()
         return ok is not False
 
@@ -2792,7 +2845,7 @@ class TechDigestPlugin(Star):
                     f"[{PLUGIN_NAME}] 推送目标不可用，{path.name} 留在报告目录里没发"
                 )
                 continue
-            await self._deliver_report(umo, path)
+            await self._deliver_report(umo, path, gid=_gid, range_label=label)
 
     @staticmethod
     def _daily_window(now: float) -> tuple[float, float, str]:
@@ -2917,16 +2970,23 @@ class TechDigestPlugin(Star):
         )
         if req is None:
             return refuse
-        started, message = await self._submit_digest(req)
-        logger.info(f"[{PLUGIN_NAME}] 工具调用：原始「{when} {group}」")
+        status, message = await self._submit_digest(req)
+        logger.info(f"[{PLUGIN_NAME}] 工具调用：原始「{when} {group}」受理结果={status}")
         # 回执由插件自己发，不指望模型转述：以前把这句话当工具返回值，模型念不念随缘，
         # 于是「总结某群」有提示、「全部群总结」没提示
-        await self._send_text(event.unified_msg_origin, message)
-        if not started:
-            return "已经回复用户了，不要再输出文字。"
-        # 图也由本工具自己发：模型不用再说「好的我帮你生成」
+        receipt_ok = await self._send_text(event.unified_msg_origin, message)
+        if not receipt_ok:
+            # 回执没发出去时让模型闭嘴 = 用户什么都收不到，必须让它补一句话
+            return (
+                "回执没能发给用户（发送失败）。请用一句话把受理情况告诉用户："
+                f"{message}（不要重复回执措辞，不要编造生成进度）"
+            )
+        # 回执真的发出去了：三种受理结果都由插件自己说完，模型再复述就是重复
         event.set_extra("chat_intel_tool_sent", True)
-        return "回执已由插件发给用户，报告图也会自己发；你不要再输出任何文字。"
+        if status == "accepted":
+            # 图也由本工具自己发：模型不用再说「好的我帮你生成」
+            return "回执已由插件发给用户，报告图也会自己发；你不要再输出任何文字。"
+        return "回执已由插件发给用户（本轮没开始生成），你不要再输出任何文字。"
 
     @filter.llm_tool(name="cancel_digest")
     async def tool_cancel_digest(self, event: AstrMessageEvent) -> str:
@@ -3094,6 +3154,15 @@ class TechDigestPlugin(Star):
             reports.load(self.reports_dir, focused) or reports.image_of(self.reports_dir, focused)
         ):
             return focused, ""
+        # 没有可用焦点时先看投递记录：索引会被 INDEX_KEEP 裁掉，投递记录不会，
+        # 所以它比索引用接近用户嘴里的「刚发来的那份」。
+        for record in reversed(reports.deliveries(self.state, umo)):
+            shipped = str(record.get("report_id") or "")
+            if shipped and (
+                reports.load(self.reports_dir, shipped)
+                or reports.image_of(self.reports_dir, shipped)
+            ):
+                return shipped, ""
         usable = [e for e in entries if reports.status_of(e) not in ("expired", "failed")]
         if usable:
             return str(usable[-1].get("id") or ""), ""
@@ -3500,7 +3569,7 @@ class TechDigestPlugin(Star):
                         # 用户主动问的，即使没东西也得回一句，不能当没听见
                         await self._send_text(umo, info)
                     continue
-                await self._deliver_report(umo, path)
+                await self._deliver_report(umo, path, gid=_gid, range_label=label)
                 await asyncio.sleep(1)
         except Exception as e:
             logger.error(f"[{PLUGIN_NAME}] 生成流程异常: {e}", exc_info=True)
