@@ -515,9 +515,19 @@ def blurb(state: dict, umo: str, limit: int = INDEX_KEEP) -> str:
     focus = get_focus(state, umo)
     if focus.get("report_id"):
         focus_line = f"[正在讨论] 报告 {focus['report_id']}"
+        for entry in items:
+            if entry.get("id") == focus["report_id"]:
+                group = entry.get("group") or (
+                    f"群 {entry['gid']}" if entry.get("gid") else "群未知"
+                )
+                focus_line += f"（{group}｜{entry.get('label') or '范围未知'}）"
+                break
         if focus.get("topic_no"):
             focus_line += f" 第 {focus['topic_no']} 个话题"
-        focus_line += "；用户说「这条」「第二条」就是它，省略 ID 也先读它。\n"
+        focus_line += (
+            "；用户说「这条」「第二条」就是它。读取时把这个 report_id 原样传回去，"
+            "省略 ID 会被拒绝——后端不猜，猜错就把讨论对象换掉了。\n"
+        )
     if not items:
         return focus_line.rstrip()
     lines: list[str] = []

@@ -5,32 +5,30 @@ import pathlib
 import re
 from types import SimpleNamespace
 
-from conftest import PLUGIN_DIR, make_plugin
+from conftest import PLUGIN_DIR, make_plugin, run_command
 import reports
-from intent import detect_intent
+from intent import mentions_plugin
 from interest import ChatInterest, normalize_topics
 
 
-# ---------------------------------------------------------------- 意图隔离
+# ---------------------------------------------------------------- 提示词范围
 
 
 def test_plugin_word_alone_is_not_an_anchor():
-    """「插件」不再算指向词：B站推送/TTS 也是插件，不能因为说了这个词就抢话。"""
+    """「插件」不算指向词：B站推送/TTS 也是插件，不能因为说了这个词就发配置提示。"""
     for text in ("B站推送插件什么情况", "TTS插件有什么毛病", "插件更新了吗"):
-        assert detect_intent(text) is None, text
+        assert mentions_plugin(text) is False, text
 
 
-def test_generic_action_needs_strong_anchor():
-    """「有什么」这种泛动作词只认强指向；弱指向（只说"群"）会被误判成要报告。"""
-    assert detect_intent("群里今天有什么好玩的") is None
-    got = detect_intent("群聊情报今天有什么")
-    assert got is not None and got.kind == "digest"
+def test_action_words_are_not_anchors():
+    """「总结」「聊了啥」这类动作词不当指向词用：那是模型要理解的事，不是字符串能判的事。"""
+    for text in ("群里今天聊了啥", "总结一下这段代码", "帮我总结今天的会"):
+        assert mentions_plugin(text) is False, text
 
 
-def test_weak_digest_still_works_with_real_cues():
-    for text in ("群里今天聊了啥", "群聊总结今天极东群聊了啥"):
-        got = detect_intent(text)
-        assert got is not None and got.kind == "digest", text
+def test_plugin_anchors_still_work():
+    for text in ("群聊情报今天聊了啥", "日报跑一份", "情报系统出问题了"):
+        assert mentions_plugin(text) is True, text
 
 
 # ---------------------------------------------------------------- 每群账号
@@ -126,6 +124,11 @@ class FakeEvent:
 
     def get_extra(self, key, default=None):
         return self.extras.get(key, default)
+
+    def plain_result(self, text):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(chain=[SimpleNamespace(text=text)])
 
     def stop_event(self):
         self.stopped = True
@@ -246,22 +249,31 @@ def test_silence_llm_stops_the_event():
 # ---------------------------------------------------------------- 工具兜底不能太急
 
 
-def test_tool_refuses_chitchat_that_is_not_a_digest_request():
-    """实测：『群里今天有什么好玩的』被模型当成要报告，直接跑了全部群。"""
+def test_tool_does_not_second_guess_the_model_wording():
+    """工具不再按用户措辞二次筛选：模型判定了要跑，插件只做权限/参数/队列校验。
+
+    以前这里还有一道 `_tool_cue` 子串闸（词表里含「群聊」）：它放过了
+    「这份群聊情报总结得真好」，也拦不住「群里今天有什么好玩的」。
+    假闸门只会让行为看词表脸色，措辞判断归模型。
+    """
     p, _ = make_plugin(owner_uids=["u1"])
     p.group_ids = ["1"]
     p.chats = [ChatInterest("1", "p", ("甲",))]
-    started = []
+    p._save_state = lambda: None
+    submitted = []
 
-    async def gen_all(*_a, **_k):
-        started.append(1)
-        return []
+    async def fake_submit(req):
+        submitted.append(req)
+        return "accepted", "开始生成"
 
-    p.generate_all = gen_all
+    async def fake_send(umo, text):
+        return True
+
+    p._submit_digest = fake_submit
+    p._send_text = fake_send
     ev = FakeEvent(gid="", text="群里今天有什么好玩的")
-    out = asyncio.run(p.tool_group_digest(ev, when="今天"))
-    assert "不要调用" in out
-    assert started == []
+    asyncio.run(p.tool_group_digest(ev, when="今天"))
+    assert submitted and submitted[0].label == "今天"
 
 
 def test_tool_still_works_for_real_digest_request():
@@ -289,50 +301,40 @@ async def _noop_name(gid):
 
 def test_busy_request_is_queued_instead_of_dropped():
     """实测：用户要紧的请求被"上一份还在生成"直接丢掉，白问一次。"""
-    p, _ = make_plugin()
+    p, _ = make_plugin(owner_uids={"10001"})
     p.chats = [ChatInterest("1", "p", ("甲",))]
     p.group_ids = ["1"]
     p.smart_parse = False
     p._running = True
     p._group_name = _noop_name
-    sent: list[str] = []
-
-    async def fake_send(umo, text):
-        sent.append(text)
-
-    p._send_text = fake_send
-    ev = FakeEvent(gid="", text="群聊情报今天的聊了啥")
-    asyncio.run(p._handle_intent(ev, detect_intent("群聊情报今天的聊了啥")))
+    p._save_state = lambda: None
+    ev = FakeEvent(gid="", uid="10001", text="群聊情报今天的聊了啥")
+    out = run_command(p, ev, arg="今天的聊了啥")
     assert p._queue and len(p._queue) == 1, list(p._queue)
     assert p._queue[0].umo == ev.unified_msg_origin
-    assert sent and "排队" in sent[0]
+    assert out and "排队" in out[0]
 
 
-def test_natural_language_entry_registers_the_placeholder():
-    """直通入口以前不登记「正在生成」：用户回头问「跑完了吗」根本查不到这条。"""
-    p, _ = make_plugin()
+def test_command_entry_registers_the_placeholder():
+    """命令入口也要登记「正在生成」：用户回头问「跑完了吗」得有据可查。"""
+    p, _ = make_plugin(owner_uids={"10001"})
     p.chats = [ChatInterest("1", "p", ("甲",))]
     p.group_ids = ["1"]
     p.group_name_map = {"1": "测试群"}
     p.smart_parse = False
     p._save_state = lambda: None
     p._group_name = _noop_name
-    sent: list[str] = []
-
-    async def fake_send(umo, text):
-        sent.append(text)
-
     async def fake_execute(request):
         return None
 
-    p._send_text = fake_send
     p._execute = fake_execute
-    ev = FakeEvent(gid="", text="群聊情报今天的聊了啥")
-    asyncio.run(p._handle_intent(ev, detect_intent("群聊情报今天的聊了啥")))
+    p._spawn = lambda coro: (coro.close(), object())[1]
+    ev = FakeEvent(gid="", uid="10001", text="/群总结 今天的聊了啥")
+    out = run_command(p, ev, arg="今天的聊了啥")
 
     entries = reports.entries(p.state, ev.unified_msg_origin)
-    assert entries and reports.status_of(entries[-1]) == "generating", "两个入口都要登记占位"
-    assert sent and "开始生成" in sent[0]
+    assert entries and reports.status_of(entries[-1]) == "generating", "命令入口要登记占位"
+    assert out and "开始生成" in out[0]
 
 
 def test_executor_takes_the_queued_request():

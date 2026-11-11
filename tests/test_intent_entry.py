@@ -1,47 +1,28 @@
-"""大白话直通入口不该被「夸奖」触发。
+"""插件不在模型之前动手：自然语言一律先交给模型理解。
 
-用户夸一句「这份群聊情报总结得真好」，插件曾经直接停掉事件、起一次生成，
-模型连解释的机会都没有——这就是 2.2.24 要修的那个故障的另一半：
-投递快照只能影响模型，管不到这个在模型之前就动手的入口。
-
-判定改成看**用法**而不是加词表：`总结得真好` 是补语，`这个群总结` 是名词短语，
-两者都不是「要一份新的」。请求句照旧命中，一条都不许漏。
+这轮架构改动的主线：撤掉按关键词直通生成/重跑/重发/取消的入口，
+`intent.py` 只剩一个用途——没配 owner 时提示一次怎么配。
+"这份群聊情报总结得真好"当初就是在这条前置入口被当成新请求的。
 """
 
 import asyncio
 
 from conftest import make_plugin
-from intent import detect_intent
+from intent import mentions_plugin
 
 UMO = "bot_a:FriendMessage:110001"
 OWNER = "110001"
 
-PRAISE = (
-    "这份群聊情报总结得真好",
-    "你发的日报总结得很好",
-    "做得真好，这个群总结",
-    "做得真好，这个群总结的报告图",
-)
-
-REQUESTS = (
-    "群聊情报今天聊了啥",
-    "帮我总结一下今天的群聊情报",
-    "总结一下昨天的群",
-    "群聊总结做一份今天的",
-    "总结得详细一点，群聊情报",
-    "群里今天聊了啥",
-    "群聊情报把今天的MeowShelter跑一份",
-)
-
 
 class Event:
-    def __init__(self, text):
+    def __init__(self, text, gid=""):
         self.message_str = text
         self.unified_msg_origin = UMO
+        self._gid = gid
         self.stopped = False
 
     def get_group_id(self):
-        return ""
+        return self._gid
 
     def get_sender_id(self):
         return OWNER
@@ -53,50 +34,71 @@ class Event:
         self.stopped = True
 
 
-def make():
-    p, _mod = make_plugin(
-        owner_uids={OWNER},
-        group_ids=["g1"],
-        group_name_map={"g1": "群1"},
-        state={},
-        reports_dir="unused",
-    )
+def make(**attrs):
+    p, _mod = make_plugin(group_ids=["g1"], group_name_map={"g1": "群1"}, state={}, **attrs)
     p._save_state = lambda: None
-    spawned = []
+    submitted = []
 
-    def fake_spawn(coro):
-        spawned.append(coro)
-        coro.close()  # 只关心「有没有起生成」，不真跑
-        return object()
+    async def fake_submit(req):
+        submitted.append(req)
+        return "accepted", "开始生成"
 
-    p._spawn = fake_spawn
-    return p, spawned
+    p._submit_digest = fake_submit
+    sent = []
 
+    async def fake_send(umo, text):
+        sent.append(text)
+        return True
 
-def test_praise_is_not_a_digest_request():
-    for text in PRAISE:
-        assert detect_intent(text) is None, f"夸奖被当成请求：{text}"
-
-
-def test_real_requests_still_match():
-    for text in REQUESTS:
-        intent = detect_intent(text)
-        assert intent is not None and intent.kind == "digest", f"正常请求被漏掉：{text}"
+    p._send_text = fake_send
+    return p, submitted, sent
 
 
-def test_praise_does_not_reach_the_entry(monkeypatch):
-    """夸奖句进入真实入口后：不停事件、不起生成、留给模型正常回话。"""
-    p, spawned = make()
-    for text in PRAISE:
-        event = Event(text)
-        asyncio.run(p.intercept_digest_intent(event))
-        assert event.stopped is False, f"夸奖把事件停了，模型没机会说话：{text}"
-    assert spawned == [], "夸一句又跑一次生成"
+def test_no_message_is_stopped_when_owner_is_configured():
+    """配好了 owner：插件一句话都不抢，全部由模型理解并选工具。"""
+    p, submitted, sent = make(owner_uids={OWNER})
+    for text in (
+        "群聊情报今天聊了啥",
+        "这份群聊情报总结得真好",
+        "你发的日报总结得很好",
+        "总结一下昨天的群",
+        "日报第二条有什么依据",
+        "再发我一遍刚才那份",
+        "取消这次总结",
+        "跑到哪了",
+    ):
+        ev = Event(text)
+        asyncio.run(p.hint_missing_owner(ev))
+        assert ev.stopped is False, f"插件不该替模型决定「{text}」"
+    assert submitted == [] and sent == []
 
 
-def test_request_does_reach_the_entry():
-    p, spawned = make()
-    event = Event("群聊情报今天聊了啥")
-    asyncio.run(p.intercept_digest_intent(event))
-    assert event.stopped is True, "明确的请求该由插件直接接手"
-    assert len(spawned) == 1
+def test_group_messages_are_never_touched():
+    p, submitted, sent = make(owner_uids=[])
+    ev = Event("群聊情报跑一份", gid="g1")
+    asyncio.run(p.hint_missing_owner(ev))
+    assert sent == [] and ev.stopped is False
+
+
+def test_missing_owner_gets_one_bounded_hint():
+    p, submitted, sent = make(owner_uids=[])
+    ev = Event("群聊情报今天有什么")
+    asyncio.run(p.hint_missing_owner(ev))
+    assert ev.stopped is True, "该说清为什么不能生成"
+    assert sent and "owner_uids" in sent[0]
+    assert submitted == [], "提示归提示，不执行任何动作"
+
+
+def test_smalltalk_without_plugin_mention_is_left_alone():
+    p, submitted, sent = make(owner_uids=[])
+    ev = Event("今天天气不错")
+    asyncio.run(p.hint_missing_owner(ev))
+    assert ev.stopped is False and sent == []
+
+
+def test_anchor_is_the_plugin_not_the_action():
+    """指向词只认插件名，不认「总结」这类动作词——动作词归模型理解。"""
+    assert mentions_plugin("群聊情报今天聊了啥") is True
+    assert mentions_plugin("日报跑一份") is True
+    assert mentions_plugin("总结一下这段代码") is False
+    assert mentions_plugin("群里今天有什么好玩的") is False

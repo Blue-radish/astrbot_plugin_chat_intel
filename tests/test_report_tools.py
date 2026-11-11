@@ -75,9 +75,9 @@ def call(p, coro_fn):
 # ---------------- get_group_report ----------------
 
 
-def test_reads_latest_report_and_lists_topics(tmp_path):
+def test_reads_the_report_by_explicit_id(tmp_path):
     p, record = build_with_report(tmp_path)
-    out = call(p, lambda: p.tool_get_group_report(Ev()))
+    out = call(p, lambda: p.tool_get_group_report(Ev(), report_id=record["id"]))
     assert record["id"] in out
     assert "極東電子考古學結社" in out
     assert "刷固件变砖" in out
@@ -86,8 +86,10 @@ def test_reads_latest_report_and_lists_topics(tmp_path):
 
 
 def test_topic_no_returns_refs_and_points_at_the_query_tool(tmp_path):
-    p, _ = build_with_report(tmp_path)
-    out = call(p, lambda: p.tool_get_group_report(Ev(), topic_no=1))
+    p, record = build_with_report(tmp_path)
+    out = call(
+        p, lambda: p.tool_get_group_report(Ev(), report_id=record["id"], topic_no=1)
+    )
     assert "来源消息引用" in out
     assert "m0" in out and "m1" in out
     assert "不含原文" in out, "要说清报告里没有原文，别让模型以为能直接念"
@@ -96,8 +98,10 @@ def test_topic_no_returns_refs_and_points_at_the_query_tool(tmp_path):
 
 
 def test_topic_no_out_of_range_is_explained(tmp_path):
-    p, _ = build_with_report(tmp_path)
-    out = call(p, lambda: p.tool_get_group_report(Ev(), topic_no=5))
+    p, record = build_with_report(tmp_path)
+    out = call(
+        p, lambda: p.tool_get_group_report(Ev(), report_id=record["id"], topic_no=5)
+    )
     assert "没有第 5 个" in out
 
 

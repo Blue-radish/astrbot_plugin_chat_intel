@@ -325,5 +325,6 @@ def test_hook_snapshot_is_stable_and_side_effect_free(tmp_path):
         asyncio.run(p.silence_llm(Event(), req))
         assert req.contexts == [], "本轮不往对话上下文里塞东西"
         assert req.system_prompt.count("[本会话最近的报告投递]") == 1
-        assert "指代规则" in req.system_prompt
+        assert "候选确定后再调用读取或重发工具" in req.system_prompt
+        assert "不要先读一份再去确认" in req.system_prompt
         assert p.state == before, "渲染不能改业务状态"

@@ -277,10 +277,11 @@ def test_group_message_gets_no_config_hint():
 
     async def fake_send(umo, text):
         sent.append((umo, text))
+        return True
 
     p._send_text = fake_send
     ev = FakeEvent(gid="220002", text="群聊情报跑一份", umo="p:GroupMessage:220002")
-    asyncio.run(p.intercept_digest_intent(ev))
+    asyncio.run(p.hint_missing_owner(ev))
     assert sent == [], "群里不许出现任何提示"
     assert not ev.is_stopped()
 
@@ -293,11 +294,44 @@ def test_private_message_still_gets_config_hint():
 
     async def fake_send(umo, text):
         sent.append(text)
+        return True
 
     p._send_text = fake_send
     ev = FakeEvent(gid="", text="群聊情报跑一份")
-    asyncio.run(p.intercept_digest_intent(ev))
+    asyncio.run(p.hint_missing_owner(ev))
     assert sent and "owner_uids" in sent[0]
+
+
+def test_hint_time_is_only_recorded_after_a_successful_send():
+    """发失败了不能把这一小时占掉，否则用户一小时里都看不到提示。"""
+    p, _ = make_plugin(owner_uids=[])
+    p.state = {}
+    p._save_state = lambda: None
+
+    async def failing_send(umo, text):
+        return False
+
+    p._send_text = failing_send
+    ev = FakeEvent(gid="", text="群聊情报跑一份")
+    asyncio.run(p.hint_missing_owner(ev))
+    assert "owner_hint_ts" not in p.state, "没发出去就别记时间"
+
+    async def ok_send(umo, text):
+        return True
+
+    p._send_text = ok_send
+    asyncio.run(p.hint_missing_owner(ev))
+    assert p.state.get("owner_hint_ts"), "发出去了才记时间"
+
+    sent: list[str] = []
+
+    async def counting_send(umo, text):
+        sent.append(text)
+        return True
+
+    p._send_text = counting_send
+    asyncio.run(p.hint_missing_owner(ev))
+    assert sent == [], "一小时内不重复提示"
 
 
 # ---------------------------------------------------------------- info 不为空

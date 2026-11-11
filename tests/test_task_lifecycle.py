@@ -99,22 +99,22 @@ def test_cancelled_generation_is_marked_failed():
     asyncio.run(scenario())
 
 
-def test_intent_entry_task_is_held_too():
-    """直通入口起的那条也要被持有：它同样会在卸载时变成孤儿。"""
+def test_command_entry_task_is_held_too():
+    """命令入口起的那条也要被持有：它同样会在卸载时变成孤儿。"""
     p, mod = _ready_plugin()
     p.owner_uids = {"110001"}
     p.owner_session = "bot_a:FriendMessage:110001"
     started = asyncio.Event()
     release = asyncio.Event()
 
-    async def fake_handle(event, intent):
+    async def fake_execute(request):
         started.set()
         await release.wait()
 
-    p._handle_intent = fake_handle
+    p._execute = fake_execute
 
     class Ev:
-        message_str = "群聊情报今天群里聊了啥"
+        message_str = "/群总结 今天群里聊了啥"
         unified_msg_origin = "bot_a:FriendMessage:110001"
 
         def get_sender_id(self):
@@ -132,10 +132,16 @@ def test_intent_entry_task_is_held_too():
         def is_stopped(self):
             return False
 
+        def plain_result(self, text):
+            from types import SimpleNamespace
+
+            return SimpleNamespace(chain=[SimpleNamespace(text=text)])
+
     async def scenario():
-        await p.intercept_digest_intent(Ev())
+        async for _result in p.cmd_digest(Ev(), arg="今天群里聊了啥"):
+            pass
         await asyncio.wait_for(started.wait(), 2)
-        assert len(p._tasks) == 1, "直通入口起的任务也要被持有"
+        assert len(p._tasks) == 1, "命令入口起的任务也要被持有"
         await p.terminate()
         assert not p._tasks
 

@@ -7,7 +7,7 @@ from collections import deque
 
 import pytest
 
-from conftest import make_plugin
+from conftest import make_plugin, run_command
 from interest import ChatInterest
 
 
@@ -38,6 +38,11 @@ class FakeEvent:
     def get_extra(self, key, default=None):
         return self.extras.get(key, default)
 
+    def plain_result(self, text):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(chain=[SimpleNamespace(text=text)])
+
 
 # ---------------------------------------------------------------- 权限
 def test_owner_empty_denies_everything():
@@ -67,15 +72,21 @@ def test_no_owner_gets_a_hint_instead_of_a_report():
 
     async def fake_send(umo, text):
         sent.append(text)
+        return True
 
     p._send_text = fake_send
-    called = []
-    p._handle_intent = lambda *a, **k: called.append(1)
+    submitted = []
+
+    async def fake_submit(req):
+        submitted.append(req)
+        return "accepted", "开始生成"
+
+    p._submit_digest = fake_submit
     ev = FakeEvent(text="群聊情报今天的聊了啥")
-    asyncio.run(p.intercept_digest_intent(ev))
+    asyncio.run(p.hint_missing_owner(ev))
     assert ev.is_stopped()
     assert sent and "owner_uids" in sent[0]
-    assert called == []  # 没有去生成
+    assert submitted == []  # 提示归提示，绝不顺手生成
 
 
 # ---------------------------------------------------------------- 空配置
@@ -264,7 +275,7 @@ def test_queue_is_bounded():
 
 
 def test_full_queue_tells_the_user():
-    p, _ = make_plugin()
+    p, _ = make_plugin(owner_uids={"10001"})
     p.chats = [ChatInterest("1", "p", ("甲",))]
     p.group_ids = ["1"]
     p.smart_parse = False
@@ -272,58 +283,47 @@ def test_full_queue_tells_the_user():
     p._queue = deque(maxlen=2)
     p._queue.extend([None, None])
     p._group_name = lambda gid: asyncio.sleep(0, result="群")
-    sent: list[str] = []
-
-    async def fake_send(umo, text):
-        sent.append(text)
-
-    p._send_text = fake_send
-    asyncio.run(p._handle_intent(FakeEvent(text="群聊情报今天的聊了啥"), __import__("intent").detect_intent("群聊情报今天的聊了啥")))
-    assert sent and "排着" in sent[0]
+    p._save_state = lambda: None
+    out = run_command(p, FakeEvent(text="/群总结 今天的聊了啥"), arg="今天的聊了啥")
+    assert out and "排着" in out[0]
 
 
 # ---------------------------------------------------------------- 未知群
 def test_unknown_group_does_not_fall_back_to_all_groups():
-    p, _ = make_plugin()
+    p, _ = make_plugin(owner_uids={"10001"})
     p.chats = [ChatInterest("1", "p", ("甲",))]
     p.group_ids = ["1"]
     p.group_name_map = {"1": "MeowShelter"}
     p.smart_parse = False
     p._running = False
-    ran = []
+    submitted = []
 
-    async def fake_gen(*args, **kwargs):
-        ran.append(args)
+    async def fake_submit(req):
+        submitted.append(req)
+        return "accepted", "开始生成"
 
-    p._generate_and_send = fake_gen
-
-    async def fake_send(umo, text):
-        sent.append(text)
-
-    sent: list[str] = []
-    p._send_text = fake_send
+    p._submit_digest = fake_submit
     p._group_name = lambda gid: asyncio.sleep(0, result="MeowShelter")
-    text = "群聊情报把今天的Slack群跑一份"
-    asyncio.run(p._handle_intent(FakeEvent(text=text), __import__("intent").detect_intent(text)))
-    assert ran == []  # 没有退回「全部群」去烧 token
-    assert sent and "没找到" in sent[0]
+    out = run_command(p, FakeEvent(text="/群总结 把今天的Slack群跑一份"), arg="把今天的Slack群跑一份")
+    assert submitted == []  # 没有退回「全部群」去烧 token
+    assert out and "没找到" in out[0]
 
 
 def test_plain_request_still_targets_all_groups():
-    p, _ = make_plugin()
+    p, _ = make_plugin(owner_uids={"10001"})
     p.chats = [ChatInterest("1", "p", ("甲",))]
     p.group_ids = ["1"]
     p.smart_parse = False
-    ran = []
+    submitted = []
 
-    async def fake_gen(*args, **kwargs):
-        ran.append(args)
+    async def fake_submit(req):
+        submitted.append(req)
+        return "accepted", "开始生成"
 
-    p._generate_and_send = fake_gen
+    p._submit_digest = fake_submit
     p._group_name = lambda gid: asyncio.sleep(0, result="群")
-    text = "群聊情报跑一份"
-    asyncio.run(p._handle_intent(FakeEvent(text=text), __import__("intent").detect_intent(text)))
-    assert ran and ran[0][5] is None  # gid=None = 全部群
+    run_command(p, FakeEvent(text="/群总结 跑一份"), arg="跑一份")
+    assert submitted and submitted[0].gid is None  # gid=None = 全部群
 
 
 # ---------------------------------------------------------------- 投递校验

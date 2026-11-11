@@ -62,12 +62,24 @@ def test_prompt_splits_generate_discuss_verify(tmp_path):
     assert "get_group_report" in text
     assert "query_group_records" in text
     assert "不要重新生成" in text, "讨论报告时不该再生成一份"
-    assert "group_digest、cancel_digest" in text
-    assert "get_group_report、query_group_records 返回后正常回答" in text
+    assert "group_digest、cancel_digest、resend_report" in text
+    assert "get_group_report、query_group_records、digest_status 返回后正常回答" in text
     assert "清空 msg_ids 并改用关键词" in text
     assert "显式传 when 扩大时间范围" in text
     assert "按结果给出的 offset" in text
     assert "不要取消" in text
+
+
+def test_prompt_requires_explicit_report_id(tmp_path):
+    """读取/重发必须自带报告 ID：省略 ID 由后端猜，猜错就把正在聊的焦点换掉。"""
+    p = plugin(tmp_path)
+    req = Req()
+    run_hint(p, Ev(), req)
+    text = req.system_prompt
+    assert "必须传 report_id" in text
+    assert "不要省略 ID 让后端替你挑" in text
+    assert "resend_report" in text and "digest_status" in text
+    # 「有投递记录」时才追加的歧义规则，由 test_delivery_facts 覆盖
 
 
 def test_prompt_says_to_separate_summary_from_evidence(tmp_path):

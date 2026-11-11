@@ -89,3 +89,19 @@ def make_plugin(**attrs):
     for key, value in attrs.items():
         setattr(p, key, value)
     return p, mod
+
+
+def run_command(p, event, arg=""):
+    """跑一次 `/群总结`，把 yield 出来的纯文本收成一个列表。"""
+    import asyncio
+
+    async def collect():
+        out = []
+        async for result in p.cmd_digest(event, arg=arg):
+            for comp in getattr(result, "chain", None) or []:
+                text = getattr(comp, "text", "")
+                if text:
+                    out.append(text)
+        return out
+
+    return asyncio.run(collect())

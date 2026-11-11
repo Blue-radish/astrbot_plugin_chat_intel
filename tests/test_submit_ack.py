@@ -84,12 +84,22 @@ class FakeEvent:
     def get_extra(self, key, default=None):
         return self.extras.get(key, default)
 
+    def get_group_id(self):
+        return ""
+
+    def get_sender_id(self):
+        return "110001"
+
+    def plain_result(self, text):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(chain=[SimpleNamespace(text=text)])
+
 
 def test_tool_sends_the_ack_itself_and_tells_the_model_to_stay_quiet():
     """工具路径必须自己发言：模型念不念这行，用户都得看到同样一句话。"""
     p, mod, sent = fresh()
     p._tool_allowed = lambda event: True
-    p._tool_cue = lambda event: True
 
     async def parse_digest(umo, text, *, again=False, named_group=""):
         return mod.DigestRequest(UMO, 0, 1, "今天", True, None), ""
@@ -107,15 +117,17 @@ def test_tool_sends_the_ack_itself_and_tells_the_model_to_stay_quiet():
     assert event.get_extra("chat_intel_tool_sent") is True
 
 
-def test_direct_intent_path_sends_the_same_ack():
-    """自然语言直通那条路一直是插件自己发，格式要和工具路径一样。"""
-    p, mod, sent = fresh()
+def test_command_entry_yields_the_same_ack_text():
+    """`/群总结` 是显式入口，回执措辞要和工具路径完全一致。"""
+    from conftest import run_command
+
+    p, mod, _sent = fresh()
     p._save_state = lambda: None
+    async def fake_execute(request):
+        return None
 
-    class Intent:
-        kind = "digest"
-        anchor = "总结"
-        action = "一下"
+    p._execute = fake_execute
+    p._spawn = lambda coro: (coro.close(), object())[1]
 
-    asyncio.run(p._handle_intent(FakeEvent(text="总结一下今天"), Intent()))
-    assert sent == ["开始生成：今天｜3 个群：电脑互助群、MeowShelter、極東電子考古學結社"]
+    out = run_command(p, FakeEvent(text="/群总结 今天"), arg="今天")
+    assert out == ["开始生成：今天｜3 个群：电脑互助群、MeowShelter、極東電子考古學結社"]

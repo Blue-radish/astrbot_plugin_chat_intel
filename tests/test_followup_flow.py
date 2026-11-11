@@ -126,46 +126,30 @@ def build_report(tmp_path, rid, refs, label, titles, since, until):
 # ---------------------------------------------------------------- 路由
 
 
-def test_followup_question_is_not_hijacked_into_a_new_report(tmp_path):
+def test_plugin_never_acts_before_the_model(tmp_path):
+    """插件不再按关键词抢先动手：追问、夸奖、明确要报告，一律先交给模型。
+
+    以前这里按「指向词 + 动作词」分流，规则跑在模型看到投递事实之前，
+    于是「这份群聊情报总结得真好」会被当成新请求，白跑一次生成。
+    """
     p = make(tmp_path)
-    went = []
+    submitted = []
 
-    async def fake_handle(event, intent):
-        went.append(intent)
+    async def fake_submit(req):
+        submitted.append(req)
+        return "accepted", "开始生成"
 
-    p._handle_intent = fake_handle
-    ev = Ev("日报第二条有什么依据")
-    asyncio.run(p.intercept_digest_intent(ev))
-    assert ev.stopped is False, "追问不该被 stop_event 掉，要留给模型选读取工具"
-    assert went == [], "追问不该进生成分支"
-
-
-def test_plain_summary_request_still_goes_direct(tmp_path):
-    p = make(tmp_path)
-    went = []
-
-    async def fake_handle(event, intent):
-        went.append(intent)
-
-    p._handle_intent = fake_handle
-    ev = Ev("总结一下今天的日报")
-    asyncio.run(p.intercept_digest_intent(ev))
-    assert ev.stopped is True, "明确要新报告时仍然直接出图，不赌模型"
-    assert went and went[0].kind == "digest"
-
-
-def test_plain_bare_variants_are_still_intercepted(tmp_path):
-    p = make(tmp_path)
-    for text in ("群聊情报今天群里聊了啥", "日报跑一份", "情报来一份"):
-        went = []
-
-        async def fake_handle(event, intent):
-            went.append(intent)
-
-        p._handle_intent = fake_handle
+    p._submit_digest = fake_submit
+    for text in (
+        "日报第二条有什么依据",
+        "这份群聊情报总结得真好",
+        "总结一下今天的日报",
+        "群聊情报今天群里聊了啥",
+    ):
         ev = Ev(text)
-        asyncio.run(p.intercept_digest_intent(ev))
-        assert ev.stopped is True, f"「{text}」是明确要新报告，应该照旧接管"
+        asyncio.run(p.hint_missing_owner(ev))
+        assert ev.stopped is False, f"插件不该替模型决定「{text}」"
+    assert submitted == [], "插件的钩子里不许起生成"
 
 
 # ---------------------------------------------------------------- 定时 → 索引
@@ -232,8 +216,10 @@ def test_full_followup_chain(tmp_path):
     reports.resolve(p.state, UMO, record)
     reports.mark_delivered(p.state, UMO, record["id"])
 
-    # 1) 读正文
-    out = asyncio.run(p.tool_get_group_report(Ev(), topic_no=1))
+    # 1) 读正文：ID 由模型从投递记录里复制（省略 ID 会被拒绝，这就对了）
+    indexed = [e["id"] for e in reports.entries(p.state, UMO) if e.get("id")]
+    assert indexed == [record["id"]]
+    out = asyncio.run(p.tool_get_group_report(Ev(), report_id=indexed[-1], topic_no=1))
     assert "刷机翻车" in out
     assert "引用核对" in out, "要说清引用现在还能不能核对"
     assert "还能在本地消息库里查到原文" in out
@@ -311,7 +297,7 @@ def test_focus_survives_next_question(tmp_path):
 
     first = asyncio.run(p.tool_get_group_report(Ev(), report_id="aaa_old", topic_no=1))
     assert "A 的话题" in first
-    again = asyncio.run(p.tool_get_group_report(Ev(), topic_no=1))
+    again = asyncio.run(p.tool_get_group_report(Ev(), report_id="aaa_old", topic_no=1))
     assert "A 的话题" in again, "省略 ID 要接上刚才那份，不能跳回最新"
 
     blurb = reports.blurb(p.state, UMO)
@@ -480,6 +466,7 @@ def test_expired_evidence_is_stated_in_the_report(tmp_path):
         tmp_path, "gone", ["老引用@1"], "十天前", ["话题"], time.time() - 10 * 86400, time.time() - 9 * 86400
     )
     reports.resolve(p.state, UMO, record)
-    out = asyncio.run(p.tool_get_group_report(Ev(), topic_no=1))
+    rid = next(e["id"] for e in reports.entries(p.state, UMO) if e.get("id"))
+    out = asyncio.run(p.tool_get_group_report(Ev(), report_id=rid, topic_no=1))
     assert "一条都查不到" in out
     assert "只能讨论报告里的概括" in out
