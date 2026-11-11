@@ -2983,10 +2983,13 @@ class TechDigestPlugin(Star):
             )
         # 回执真的发出去了：三种受理结果都由插件自己说完，模型再复述就是重复
         event.set_extra("chat_intel_tool_sent", True)
+        # 受理事实要留在工具结果里：下一轮它得知道「刚才那次是排队还是开跑了」，
+        # 光说「请停止输出」等于把模型当喇叭，事实一点没留下。
+        receipt = f"受理结果={status}。{message}\n"
         if status == "accepted":
             # 图也由本工具自己发：模型不用再说「好的我帮你生成」
-            return "回执已由插件发给用户，报告图也会自己发；你不要再输出任何文字。"
-        return "回执已由插件发给用户（本轮没开始生成），你不要再输出任何文字。"
+            return receipt + "回执已由插件发给用户，报告图也会自己发；你不要再输出任何文字。"
+        return receipt + "回执已由插件发给用户（本轮没开始生成）；你不要再输出任何文字。"
 
     @filter.llm_tool(name="cancel_digest")
     async def tool_cancel_digest(self, event: AstrMessageEvent) -> str:

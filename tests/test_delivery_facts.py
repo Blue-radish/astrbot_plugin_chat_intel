@@ -154,6 +154,34 @@ def test_delivery_keeps_no_focus_side_effect(tmp_path):
     assert [d["report_id"] for d in reports.deliveries(p.state, UMO)] == ["one"]
 
 
+def test_snapshot_lists_newest_first(tmp_path):
+    """先投递 A 再投递 B：快照第 1 条必须是 B，默认读取也要指向 B。
+
+    列表本身按追加顺序存（老的在前），但提示词里「刚发来的那份」指最近一条。
+    以前照原序渲染，模型被指去读第 1 条，读到的其实是最旧那份。
+    """
+    p, _ = make(tmp_path)
+    put(p, "olderA")
+    reports.resolve(p.state, UMO, record("olderA"))
+    put(p, "newerB")
+    reports.resolve(p.state, UMO, record("newerB"))
+
+    asyncio.run(p._deliver_report(UMO, p.reports_dir / "olderA.png"))
+    asyncio.run(p._deliver_report(UMO, p.reports_dir / "newerB.png"))
+
+    assert [d["report_id"] for d in reports.deliveries(p.state, UMO)] == [
+        "olderA",
+        "newerB",
+    ], "底层仍按追加顺序存"
+
+    text = reports.delivery_blurb(p.state, UMO, p.reports_dir)
+    first = next(line for line in text.splitlines() if line.startswith("1)"))
+    assert "newerB" in first, f"「刚发来的」必须排在第 1 条：{first}"
+
+    rid, _why = p._pick_report(UMO, "", "")
+    assert rid == "newerB", "默认读取要和快照第 1 条指向同一份"
+
+
 # ---------------------------------------------------------------- 正文可读性
 
 

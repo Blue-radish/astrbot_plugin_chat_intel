@@ -100,7 +100,9 @@ def test_tool_sends_the_ack_itself_and_tells_the_model_to_stay_quiet():
     out = asyncio.run(p.tool_group_digest(event, when="今天", group=""))
 
     assert len(sent) == 1 and sent[0].startswith("开始生成：今天｜3 个群"), sent
-    assert "开始生成" not in out, f"回执已经发过了，别让模型再念一遍：{out}"
+    # 受理事实要留在工具结果里（排队还是开跑，下一轮得知道）；沉默由 hook 保证，不靠这句话
+    assert "受理结果=accepted" in out, out
+    assert "开始生成：今天" in out
     assert "不要" in out or "沉默" in out
     assert event.get_extra("chat_intel_tool_sent") is True
 

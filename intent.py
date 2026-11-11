@@ -69,6 +69,40 @@ def _first_hit(text: str, words: tuple[str, ...]) -> str:
     return ""
 
 
+# 「总结得真好」「做得真好，这个群总结」是在夸，不是在要东西。
+# 动词后面接「得 + 程度词」是补语；句子到动词就收尾则是名词短语。两种都不是请求。
+_DEGREE = ("真", "很", "太", "非常", "挺", "好", "不错", "棒", "漂亮", "完美")
+# 只有「总结」会被当名词/补语用错：「跑一份」「聊了啥」这类自带句式，不存在歧义
+_AMBIGUOUS_ACTIONS = ("总结",)
+
+
+def _digest_is_request(text: str) -> bool:
+    """「要报告」至少要有一个动作词落在请求位置上。
+
+    夸奖句同样会被动作词「总结」命中，但用法不对：`总结得真好` 是补语，
+    `这个群总结` 是名词短语。放过这两种，否则一句夸奖就白跑一次生成——
+    用户夸完紧接着又收到一份新报告，比不回应更糟。
+    """
+    for action in ACTIONS["digest"]:
+        if action not in text:
+            continue
+        if action not in _AMBIGUOUS_ACTIONS:
+            return True
+        start = text.find(action)
+        while start >= 0:
+            before = text[:start]
+            after = text[start + len(action) :]
+            trimmed = after.strip(" \t　！。，,、？?～~!…")
+            evaluative = after.startswith("得") and after[1:2] in _DEGREE
+            attributive = after.startswith("的")
+            # 「做得真好，这个群总结」（句末，前面是名词中心语）
+            noun_at_end = not trimmed and before.rstrip(" \t　")[-1:] in ("群", "个", "份", "条")
+            if not (evaluative or attributive or noun_at_end):
+                return True
+            start = text.find(action, start + 1)
+    return False
+
+
 def detect_intent(text: str) -> Intent | None:
     """返回命中的意图，没有就返回 None。"""
     if not text:
@@ -91,6 +125,10 @@ def detect_intent(text: str) -> Intent | None:
         if kind in REQUIRE_STRONG and not strong:
             continue
         if not strong and action not in WEAK_ACTIONS:
+            continue
+        if kind == "digest" and not _digest_is_request(text):
+            # 只是在夸「上一份总结」：交给模型正常回话（要不要读报告由回应决定），
+            # 不能在这里就停掉事件并起一次生成。
             continue
         return Intent(kind=kind, anchor=anchor, action=action, strong=strong)
     return None

@@ -661,8 +661,11 @@ def delivery_blurb(
     两者会同时出现，所以措辞上必须能分开——否则同一个「这条」会有两个指向。
 
     纯只读：不建会话键、不改 state，模型每轮请求都会调它。
+
+    **倒序展示**：列表按追加顺序存（老的在前），但提示词里「刚发来的那份」指的是最近一条，
+    所以第 1 条必须是新的。以前照原序渲染，提示词让模型读第 1 条，读到的却是最旧那份。
     """
-    items = deliveries(state, umo)[-limit:]
+    items = list(reversed(deliveries(state, umo)[-limit:]))
     if not items:
         return ""
     lines = [
