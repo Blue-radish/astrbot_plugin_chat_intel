@@ -37,6 +37,9 @@ import httpx  # noqa: E402
 
 import reports  # noqa: E402
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import accept_judge  # noqa: E402
+
 CFG = json.loads((ASTRBOT_HOME / "data" / "cmd_config.json").read_text(encoding="utf-8-sig"))
 SOURCES = {s["id"]: s for s in CFG["provider_sources"]}
 PROV = next(p for p in CFG["provider"] if p["id"] == "wb2-deepseek-v41-flash")
@@ -431,65 +434,15 @@ IDENTITY_KINDS = {
 # ------------------------------------------------------------------ 判定
 
 
-def check_call(call, expect, p, text):
-    """单次调用是否符合期望：工具名 + 关键参数 + 后端执行结果。"""
-    problems = []
-    if call["name"] != expect["tool"]:
-        return [f"工具 {call['name']} ≠ {expect['tool']}"], ""
-    out, trace = run_tool(p, call, text)
-    args = call["args"]
-    if "report_id" in expect:
-        got = str(args.get("report_id") or "")
-        if got != expect["report_id"]:
-            problems.append(f"report_id={got or '(空)'} ≠ {expect['report_id']}")
-        elif f"已读报告 {expect['report_id']}" not in out and "受理结果=sent" not in out:
-            problems.append("后端没有真的读到/发出那一份")
-        delivered = trace.get("delivered")
-        if delivered:
-            if delivered[0] != f"{expect['report_id']}.png":
-                problems.append(f"实际发出的是 {delivered[0]}")
-    if "topic_no" in expect:
-        got = int(args.get("topic_no") or 0)
-        if got != expect["topic_no"]:
-            problems.append(f"topic_no={got} ≠ {expect['topic_no']}")
-        elif expect["topic_no"] > 1 and f"话题 {expect['topic_no']}" not in out:
-            problems.append("结果里没有那个话题")
-    if expect["tool"] == "group_digest":
-        req = trace.get("request")
-        if req is None:
-            problems.append("没有真的提交请求")
-        else:
-            if "gid" in expect and req.gid != expect["gid"]:
-                problems.append(f"gid={req.gid} ≠ {expect['gid']}")
-            if "label" in expect and req.label != expect["label"]:
-                problems.append(f"label={req.label} ≠ {expect['label']}")
-            if "again" in expect and bool(req.again) != expect["again"]:
-                problems.append(f"again={req.again} ≠ {expect['again']}")
-            if "incremental" in expect and bool(req.incremental) != expect["incremental"]:
-                problems.append(f"incremental={req.incremental} ≠ {expect['incremental']}")
-    return problems, out
+def execute(call, p, text):
+    """给判定模块用的执行钩子：参数真的喂给后端，返回 (结果文本, 痕迹)。"""
+    return run_tool(p, call, text)
 
 
 def judge_round(p, text, calls, expect, allow_extra):
-    """一轮的全部调用一起判：不许越权动手，必须命中期望的那一个。"""
-    if not expect:
-        side_effect = {"group_digest", "resend_report", "cancel_digest"}
-        extra = [c["name"] for c in calls if c["name"] in side_effect and c["name"] not in allow_extra]
-        if extra:
-            return [f"不该动手却调了 {extra}"], ""
-        return [], ""
-    hits = [c for c in calls if c["name"] == expect["tool"]]
-    if not hits:
-        return [f"没有调用 {expect['tool']}（实际 {[c['name'] for c in calls] or '无'}）"], ""
-    problems = []
-    for call in calls:
-        if call is hits[0]:
-            continue
-        if call["name"] in {"group_digest", "resend_report", "cancel_digest"}:
-            problems.append(f"附带调用了 {call['name']}")
-    sub_problems, out = check_call(hits[0], expect, p, text)
-    problems.extend(sub_problems)
-    return problems, out
+    return accept_judge.judge_round(
+        calls, expect, allow_extra, lambda call: execute(call, p, text)
+    )
 
 
 def run_case(mod, spec, tools):
@@ -502,12 +455,13 @@ def run_case(mod, spec, tools):
             {"role": "user", "content": spec["text"]},
         ]
         calls, _content, msg = post(base, tools)
-        problems, out = judge_round(p, spec["text"], calls, spec["expect"], spec["allow_extra"])
+        first = judge_round(p, spec["text"], calls, spec["expect"], spec["allow_extra"])
+        problems, _hard, out = first
         notes = []
         if calls:
-            first = calls[0]
-            shown = first["name"] + (
-                f"({first['args'].get('report_id')})" if first["args"].get("report_id") else ""
+            head = calls[0]  # 别用 first：那个名字留给第一轮的判定结果
+            shown = head["name"] + (
+                f"({head['args'].get('report_id')})" if head["args"].get("report_id") else ""
             )
         else:
             shown = "（无工具调用）"
@@ -537,9 +491,8 @@ def run_case(mod, spec, tools):
                 {"role": "tool", "tool_call_id": calls[0]["id"], "content": out},
             ]
             calls2, content2, _m2 = post(msgs, tools)
-            r2_problems, _out2 = judge_round(
-                p, spec["text"], calls2, expect, spec["allow_extra"]
-            )
+            second = judge_round(p, spec["text"], calls2, expect, spec["allow_extra"])
+            r2_problems, _r2_hard, _out2 = second
             if calls2:
                 c2 = calls2[0]
                 extra = ", ".join(f"{k}={v}" for k, v in c2["args"].items() if k != "report_id")
@@ -549,12 +502,13 @@ def run_case(mod, spec, tools):
             else:
                 shown += " →轮2 无工具调用"
                 notes.append("轮2 反问：" + (content2 or "")[:24])
+            merged = accept_judge.merge_rounds(first, second)
             if r2_problems:
                 notes.append("轮2 " + "；".join(r2_problems))
-                if not problems:
-                    problems = ["轮1 缺 ID 且轮2 未补齐"]
+            if merged:
+                problems = merged or ["轮1 缺 ID 且轮2 未补齐"]
             else:
-                problems = []  # 第二轮补齐也算过
+                problems = []
                 notes.append("轮2 补齐")
         return spec, shown, problems, notes
     finally:

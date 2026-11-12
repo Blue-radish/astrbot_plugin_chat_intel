@@ -102,3 +102,18 @@ def test_anchor_is_the_plugin_not_the_action():
     assert mentions_plugin("日报跑一份") is True
     assert mentions_plugin("总结一下这段代码") is False
     assert mentions_plugin("群里今天有什么好玩的") is False
+
+
+def test_plugin_has_no_command_entry():
+    """Prevent reintroducing a command fallback into natural conversation."""
+    import ast
+    import inspect
+    from conftest import load_main
+
+    source = inspect.getsource(load_main().TechDigestPlugin)
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for decorator in node.decorator_list:
+                if isinstance(decorator, ast.Call) and isinstance(decorator.func, ast.Attribute):
+                    assert decorator.func.attr != "command", node.name

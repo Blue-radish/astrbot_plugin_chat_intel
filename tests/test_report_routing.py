@@ -77,7 +77,8 @@ def test_prompt_requires_explicit_report_id(tmp_path):
     run_hint(p, Ev(), req)
     text = req.system_prompt
     assert "必须传 report_id" in text
-    assert "不要省略 ID 让后端替你挑" in text
+    assert "报告 ID 由你内部处理" in text
+    assert "自行选定并补参继续" in text
     assert "resend_report" in text and "digest_status" in text
     # 「有投递记录」时才追加的歧义规则，由 test_delivery_facts 覆盖
 

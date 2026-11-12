@@ -5,7 +5,7 @@ import pathlib
 import re
 from types import SimpleNamespace
 
-from conftest import PLUGIN_DIR, make_plugin, run_command
+from conftest import PLUGIN_DIR, make_plugin, run_digest_tool
 import reports
 from intent import mentions_plugin
 from interest import ChatInterest, normalize_topics
@@ -309,14 +309,14 @@ def test_busy_request_is_queued_instead_of_dropped():
     p._group_name = _noop_name
     p._save_state = lambda: None
     ev = FakeEvent(gid="", uid="10001", text="群聊情报今天的聊了啥")
-    out = run_command(p, ev, arg="今天的聊了啥")
+    out = run_digest_tool(p, ev, arg="今天的聊了啥")
     assert p._queue and len(p._queue) == 1, list(p._queue)
     assert p._queue[0].umo == ev.unified_msg_origin
     assert out and "排队" in out[0]
 
 
-def test_command_entry_registers_the_placeholder():
-    """命令入口也要登记「正在生成」：用户回头问「跑完了吗」得有据可查。"""
+def test_tool_entry_registers_the_placeholder():
+    """工具入口也要登记「正在生成」：用户回头问「跑完了吗」得有据可查。"""
     p, _ = make_plugin(owner_uids={"10001"})
     p.chats = [ChatInterest("1", "p", ("甲",))]
     p.group_ids = ["1"]
@@ -329,11 +329,11 @@ def test_command_entry_registers_the_placeholder():
 
     p._execute = fake_execute
     p._spawn = lambda coro: (coro.close(), object())[1]
-    ev = FakeEvent(gid="", uid="10001", text="/群总结 今天的聊了啥")
-    out = run_command(p, ev, arg="今天的聊了啥")
+    ev = FakeEvent(gid="", uid="10001", text="群聊情报， 今天的聊了啥")
+    out = run_digest_tool(p, ev, arg="今天的聊了啥")
 
     entries = reports.entries(p.state, ev.unified_msg_origin)
-    assert entries and reports.status_of(entries[-1]) == "generating", "命令入口要登记占位"
+    assert entries and reports.status_of(entries[-1]) == "generating", "工具入口要登记占位"
     assert out and "开始生成" in out[0]
 
 

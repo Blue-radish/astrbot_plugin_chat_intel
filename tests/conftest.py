@@ -77,6 +77,9 @@ def make_plugin(**attrs):
     p.smart_parse = attrs.pop("smart_parse", False)
     p.keep_days = attrs.pop("keep_days", 7)
     p._running = attrs.pop("_running", False)
+    # 用户叫停 vs 插件卸载：生产里在 __init__ 置位，这里跟着补上，免得测试拿到 AttributeError
+    p._user_cancelled = attrs.pop("_user_cancelled", False)
+    p._unloading = attrs.pop("_unloading", False)
     p._tasks = attrs.pop("_tasks", set())
     p._current_req = attrs.pop("_current_req", None)
     p._current_task = attrs.pop("_current_task", None)
@@ -91,17 +94,22 @@ def make_plugin(**attrs):
     return p, mod
 
 
-def run_command(p, event, arg=""):
-    """跑一次 `/群总结`，把 yield 出来的纯文本收成一个列表。"""
+
+
+def run_digest_tool(p, event, arg=""):
+    """Invoke the generation tool and capture its user-facing receipt."""
     import asyncio
 
-    async def collect():
-        out = []
-        async for result in p.cmd_digest(event, arg=arg):
-            for comp in getattr(result, "chain", None) or []:
-                text = getattr(comp, "text", "")
-                if text:
-                    out.append(text)
-        return out
+    sent = []
+    original_send = p._send_text
 
-    return asyncio.run(collect())
+    async def capture(umo, message):
+        sent.append(message)
+        return True
+
+    p._send_text = capture
+    try:
+        result = asyncio.run(p.tool_group_digest(event, when=arg))
+    finally:
+        p._send_text = original_send
+    return sent or [result]

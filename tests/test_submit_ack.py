@@ -117,9 +117,9 @@ def test_tool_sends_the_ack_itself_and_tells_the_model_to_stay_quiet():
     assert event.get_extra("chat_intel_tool_sent") is True
 
 
-def test_command_entry_yields_the_same_ack_text():
-    """`/群总结` 是显式入口，回执措辞要和工具路径完全一致。"""
-    from conftest import run_command
+def test_tool_entry_sends_the_same_ack_text():
+    """生成工具应向用户发送完整的受理范围。"""
+    from conftest import run_digest_tool
 
     p, mod, _sent = fresh()
     p._save_state = lambda: None
@@ -129,5 +129,5 @@ def test_command_entry_yields_the_same_ack_text():
     p._execute = fake_execute
     p._spawn = lambda coro: (coro.close(), object())[1]
 
-    out = run_command(p, FakeEvent(text="/群总结 今天"), arg="今天")
+    out = run_digest_tool(p, FakeEvent(text="群聊情报， 今天"), arg="今天")
     assert out == ["开始生成：今天｜3 个群：电脑互助群、MeowShelter、極東電子考古學結社"]

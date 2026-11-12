@@ -231,7 +231,7 @@ def split_cfg_list(value: object) -> list[str]:
     return out
 
 
-@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.26")
+@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.27")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -292,6 +292,9 @@ class TechDigestPlugin(Star):
         self._current_task: asyncio.Task | None = None  # 包着它跑的后台任务      # 在跑的后台任务（卸载时要一起收）
         self._last_run_date: str | None = None
         self._running = False
+        # 用户叫停 vs 插件卸载：前者只掐当前这一份，后者连队列一起停
+        self._user_cancelled = False
+        self._unloading = False
 
         fonts = [
             f.name
@@ -724,11 +727,17 @@ class TechDigestPlugin(Star):
             and not task.done()
         )
         if stop_running:
+            # 先打标记再 cancel：执行循环看到它就知道「这是用户掐一份，不是卸载」，
+            # 收尾后继续吃队列（以前 CancelledError 直接 raise，后面排队的定时档就永远停住）
+            self._user_cancelled = True
             task.cancel()
 
-            def _release(_task) -> None:
+            def _release(finished) -> None:
                 # 任务要是还没被调度起来就被取消，它的 finally 永远不会跑，
                 # 执行位就一直占着——之后所有提交只能排队到重启。
+                # 只清「自己那一份」的状态：清早了会抹掉下一个任务的运行标记。
+                if getattr(self, "_current_task", None) is not finished:
+                    return
                 self._running = False
                 self._current_req = None
                 self._current_task = None
@@ -747,11 +756,11 @@ class TechDigestPlugin(Star):
             return f"已取消：排队的 {dropped} 份清掉"
         return "现在没有在跑或排队的生成"
 
-    # ------------------------------------------------------------------ 两个入口共用
+    # ------------------------------------------------------------------ 生成请求
     async def _parse_digest(
         self, umo: str, text: str, *, again: bool = False, named_group: str = ""
     ) -> tuple[DigestRequest | None, str]:
-        """两个入口共用：把「什么时候、哪个群、要不要重跑」解析成一份请求。
+        """把模型提供的时间、群和重跑参数解析成一份请求。
 
         解析不出来就返回 (None, 要说的话)——群名对不上时宁可拒绝，也不要退回
         「全部群」白烧一遍额度。自然语言和工具调用以前各写一份，改一处漏一处。
@@ -849,7 +858,7 @@ class TechDigestPlugin(Star):
         return [(gid, self.group_name_map.get(gid) or f"群 {gid}") for gid in gids]
 
     async def _submit_digest(self, req: DigestRequest) -> tuple[str, str]:
-        """两个入口共用的提交：抢执行位/排队 → 登记占位 → 后台跑。
+        """提交生成请求：抢执行位/排队 → 登记占位 → 后台跑。
 
         返回 (受理结果, 回给用户的话)。结果只有三种：
         - `accepted`：真的开跑了
@@ -944,8 +953,7 @@ class TechDigestPlugin(Star):
                         announce=True,
                     )
             except asyncio.CancelledError:
-                # 卸载/重载把任务掐了：占位不能永远停在「正在生成」，否则用户问「跑完了吗」
-                # 会一直被告知还在跑。
+                # 占位不能永远停在「正在生成」，否则用户问「跑完了吗」会一直被告知还在跑。
                 if request is not None:
                     # 「全部群」的 request.gid 是 None，要按会话把所有在跑的占位都收尾
                     reports.settle(
@@ -955,7 +963,20 @@ class TechDigestPlugin(Star):
                         reason="任务被取消（插件卸载或重载）",
                     )
                     self._save_state()
-                raise
+                if getattr(self, "_unloading", False) or not getattr(
+                    self, "_user_cancelled", False
+                ):
+                    # 卸载/重载：整个执行循环都停，队列由 terminate() 清
+                    raise
+                # 用户叫停的是这一份：队列里别的会话和定时档还得继续跑
+                self._user_cancelled = False
+                current = asyncio.current_task()
+                if current is not None and hasattr(current, "uncancel"):
+                    # 3.11+：把取消计数还回去，否则后面每个 await 都可能立刻抛 CancelledError
+                    current.uncancel()
+                logger.info(
+                    f"[{PLUGIN_NAME}] 用户叫停这一份，继续消费队列（还剩 {len(self._queue)} 份）"
+                )
             except Exception as e:
                 logger.error(f"[{PLUGIN_NAME}] 生成任务失败: {e}", exc_info=True)
             finally:
@@ -1107,6 +1128,9 @@ class TechDigestPlugin(Star):
                     "\n\n[群聊情报工具]\n"
                     "你可以通过以下六个工具生成报告、读取正文、重发旧图和查询已采集的群消息。"
                     "先理解用户在说什么，再决定正常回答还是调工具；涉及具体群聊内容时先读工具结果再回答。\n"
+                    "以自然交流为主，根据用户措辞和上下文直接选择工具及报告；报告 ID 由你内部处理。"
+                    "工具返回候选时，通常自行选定并补参继续；只有多个对象同样合理时才简短询问用户。"
+                    "用户只是评价或闲聊时自然回应，用户明确要求生成时直接提交。\n"
                     "1) 明确要新总结或重跑 → group_digest。when 传用户指定的时间，group 传群名或群号；"
                     "未指定的参数留空。时间留空表示增量，指定今天、昨天等范围则汇总该范围；"
                     "用户明确要求重跑时传 again=true。讨论已有报告时使用读取工具，不要重新生成报告。\n"
@@ -1119,7 +1143,7 @@ class TechDigestPlugin(Star):
                     "不要因为它是第二行或时间更早就换一份；"
                     "问「有没有遗漏」「这份够不够全」「靠不靠谱」也是讨论报告内容，读报告回答。"
                     "读取会更新讨论焦点，所以要先把「用户指的是哪一份」确定下来："
-                    "ID 不确定就先问清或把候选列给用户，不要省略 ID 让后端替你挑。需要原话时再查原始消息。\n"
+                    "优先根据上下文选择 ID；工具返回候选时自行补参继续，确实存在多个同样合理的对象时再简短确认。需要原话时再查原始消息。\n"
                     "3) 查原话或验证证据 → query_group_records。精确查引用时同时传 report_id 和 msg_ids；"
                     "查某个话题的其他消息时用 keyword。引用优先于关键词。"
                     "查报告之后的后续时保留 report_id 定位群，显式传 when 扩大时间范围，"
@@ -1153,8 +1177,8 @@ class TechDigestPlugin(Star):
                     hint += (
                         "\n「刚才那份」「刚发来的」「第二条」这类说法，结合上面的投递记录和"
                         "「正在讨论」判断指的是哪一份；候选确定后再调用读取或重发工具，"
-                        "并在回答里点明你用的是哪一份。"
-                        "多份都符合描述时，把报告 ID、群名、范围、时间列给用户选，"
+                        "回答围绕用户的问题展开，需要说明对象时使用群名或日期即可。"
+                        "多个对象同样合理且上下文无法区分时，简短询问群名或日期，"
                         "不要先读一份再去确认——读取会改讨论焦点。"
                         "投递记录只说明图已发送到本会话，"
                         "不能据此说用户已读、已认同或已被告知内容。"
@@ -2915,6 +2939,7 @@ class TechDigestPlugin(Star):
 
     async def terminate(self) -> None:
         """卸载/重载：定时器和在跑的任务一起取消，别留孤儿继续改状态。"""
+        self._unloading = True
         pending = [task for task in self._tasks if not task.done()]
         for task in pending:
             task.cancel()
@@ -2931,48 +2956,7 @@ class TechDigestPlugin(Star):
             self._save_state()
         self._task = None
         self._running = False
-
-    # ------------------------------------------------------------------ 命令
-    @filter.command("群总结")
-    async def cmd_digest(self, event: AstrMessageEvent, arg: str = ""):
-        """显式入口：/群总结 [今天|昨天|最近3天] [群名]。
-
-        自然语言交给模型（`group_digest` 等工具），这条命令是**不会因理解误差而漏执行**
-        的确定性通道。校验顺序固定：私聊 → owner → 群配置 → 参数 → 队列，
-        每一层的拒绝理由原样回给用户，不吞。
-        """
-        umo = event.unified_msg_origin
-        try:
-            if event.get_group_id():
-                yield event.plain_result("群总结只在私聊里用，群里不发报告。")
-                return
-        except Exception:
-            yield event.plain_result("认不出这个会话，没法生成。")
-            return
-        if not self.owner_uids:
-            yield event.plain_result(
-                "还没配置「谁可以要报告」（owner_uids），先在插件设置里填上你的 QQ 号。"
-            )
-            return
-        try:
-            sender = str(event.get_sender_id())
-        except Exception:
-            sender = ""
-        if sender not in self.owner_uids:
-            yield event.plain_result("这个命令只有配置里的主人能用。")
-            return
-        if not self.group_ids:
-            yield event.plain_result("插件还没配置要监控的群，先在「要总结的群」里加一行。")
-            return
-
-        text = (arg or "").strip()
-        req, refuse = await self._parse_digest(umo, text)
-        if req is None:
-            yield event.plain_result(refuse)
-            return
-        status, message = await self._submit_digest(req)
-        logger.info(f"[{PLUGIN_NAME}] 命令 /群总结 受理结果={status} 原文「{text[:40]}」")
-        yield event.plain_result(message)
+        self._user_cancelled = False
 
     # ------------------------------------------------------------------ 模型工具
     def _tool_allowed(self, event: AstrMessageEvent) -> bool:
@@ -3060,8 +3044,16 @@ class TechDigestPlugin(Star):
         if not self._tool_allowed(event):
             return "这个工具只能在私聊里由主人使用；群里不会发任何报告。"
         message = await self.cancel_digest(event.unified_msg_origin)
-        await self._send_text(event.unified_msg_origin, message)
-        return "已经回复用户了，不要再输出文字。"
+        # 和生成工具同一套：回执真的发出去了才让模型闭嘴。
+        # 以前不管发没发出去都回「已经回复用户了」，发送失败时用户一个字都收不到。
+        sent = await self._send_text(event.unified_msg_origin, message)
+        if not sent:
+            return (
+                "取消操作已执行，但回执没能发给用户（发送失败）。"
+                f"请用一句话告诉用户取消结果：{message}"
+            )
+        event.set_extra("chat_intel_tool_sent", True)
+        return f"受理结果=sent。{message}（已由插件回复用户，你不要再输出文字。）"
 
     @filter.llm_tool(name="resend_report")
     async def tool_resend_report(self, event: AstrMessageEvent, report_id: str = "") -> str:
@@ -3070,7 +3062,7 @@ class TechDigestPlugin(Star):
         用户说「刚才那份再发我一遍」「重发一下昨天那份」时调用。这是重发旧图，
         不是重新生成：不要改用 group_digest。图按 report_id 从报告目录取，
         **必须传 report_id**，从「正在讨论」或「本会话最近的报告投递」里原样复制；
-        留空会被拒绝并返回候选，不会替你挑一份。返回值说明发送成败。
+        参数留空时工具会返回候选，你应结合上下文选定并重试。返回值说明发送成败。
 
         Args:
             report_id(string): **必填**。要重发的报告 ID，从「正在讨论」「本会话最近的报告投递」或工具结果复制
@@ -3341,10 +3333,10 @@ class TechDigestPlugin(Star):
                 )
             return "还没有可以读取的报告：先让我生成一份（group_digest），之后才能讨论它。"
         return (
-            "没给 report_id，我不猜——猜错会把正在讨论的那份换掉。请从下面挑一个原样传回来：\n"
+            "没给 report_id，可用报告如下。请结合用户消息和讨论上下文选定 ID，继续调用读取或重发工具：\n"
             + "\n".join(rows)
             + "\n说「正在讨论的那份」就用标着「正在讨论中」的那个 ID；说「刚发来的」就用标着"
-            "「最近投递」的那个。还不确定就问用户，别自己选。"
+            "「最近投递」的那个。能根据上下文判断时直接继续，仅在多个对象同样合理时简短确认。"
         )
 
     @filter.llm_tool(name="get_group_report")
@@ -3360,7 +3352,7 @@ class TechDigestPlugin(Star):
         查报告之后的后续时传 report_id、关键词和更大的 when 范围，并清空 msg_ids。
 
         Args:
-            report_id(string): **必填，不能省略**。报告 ID，从「正在讨论」「本会话最近的报告投递」或上一次工具结果里原样复制。「刚发来的」指投递记录第 1 条，「正在讨论的」指「正在讨论」那一份，两者可能不是同一份，按用户措辞选。留空会被拒绝并返回候选，不会替你挑一份——读取会更新讨论焦点，猜错就把正在聊的那份切走了
+            report_id(string): **必填，不能省略**。报告 ID，从「正在讨论」「本会话最近的报告投递」或上一次工具结果里原样复制。「刚发来的」指投递记录第 1 条，「正在讨论的」指「正在讨论」那一份，两者可能不是同一份，按用户措辞选。参数留空时工具返回候选，由你根据上下文选定后继续调用；用户只需自然描述报告，内部 ID 由你处理
             topic_no(int): 只看第几个话题（从 1 开始）；0 表示返回全部话题
             gid(string): 群号或群名片段；只在用户明确按群提问、且该群只有一份报告时才用。读取更早的指定报告必须传 report_id，显式 report_id 优先
         """

@@ -24,6 +24,7 @@ def fresh(**attrs):
 
     async def send_text(umo, text):
         sent.append(text)
+        return True  # 假的发送也要如实返回成败：工具现在按返回值决定要不要让模型闭嘴
 
     p, mod = make_plugin(
         chats=[ChatInterest(GID, "bot_b", ("电脑",), (), "电脑互助群"), ChatInterest(GID2, "bot_b", ("电脑",), (), "MeowShelter")],
@@ -162,5 +163,9 @@ def test_tool_cancel_replies_itself():
     out = asyncio.run(p.tool_cancel_digest(FakeEvent()))
 
     assert sent and "取消" in sent[0], sent
-    assert "取消" not in out, "回执已经发过，别让模型再念一遍"
+    # 回执由插件发（sent），工具结果里同时留下「取消成功」和「通知成功」两个事实，
+    # 模型据此闭嘴；但事实不能被抹掉——下一轮它得知道刚才取消了什么。
+    assert "受理结果=sent" in out, out
+    assert "取消" in out, out
+    assert "不要再输出" in out
     assert len(p._queue) == 0

@@ -7,7 +7,7 @@ from collections import deque
 
 import pytest
 
-from conftest import make_plugin, run_command
+from conftest import make_plugin, run_digest_tool
 from interest import ChatInterest
 
 
@@ -284,7 +284,7 @@ def test_full_queue_tells_the_user():
     p._queue.extend([None, None])
     p._group_name = lambda gid: asyncio.sleep(0, result="群")
     p._save_state = lambda: None
-    out = run_command(p, FakeEvent(text="/群总结 今天的聊了啥"), arg="今天的聊了啥")
+    out = run_digest_tool(p, FakeEvent(text="群聊情报， 今天的聊了啥"), arg="今天的聊了啥")
     assert out and "排着" in out[0]
 
 
@@ -304,7 +304,7 @@ def test_unknown_group_does_not_fall_back_to_all_groups():
 
     p._submit_digest = fake_submit
     p._group_name = lambda gid: asyncio.sleep(0, result="MeowShelter")
-    out = run_command(p, FakeEvent(text="/群总结 把今天的Slack群跑一份"), arg="把今天的Slack群跑一份")
+    out = run_digest_tool(p, FakeEvent(text="群聊情报， 把今天的Slack群跑一份"), arg="把今天的Slack群跑一份")
     assert submitted == []  # 没有退回「全部群」去烧 token
     assert out and "没找到" in out[0]
 
@@ -322,7 +322,7 @@ def test_plain_request_still_targets_all_groups():
 
     p._submit_digest = fake_submit
     p._group_name = lambda gid: asyncio.sleep(0, result="群")
-    run_command(p, FakeEvent(text="/群总结 跑一份"), arg="跑一份")
+    run_digest_tool(p, FakeEvent(text="群聊情报， 跑一份"), arg="跑一份")
     assert submitted and submitted[0].gid is None  # gid=None = 全部群
 
 
