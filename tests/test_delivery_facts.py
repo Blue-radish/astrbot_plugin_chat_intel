@@ -178,8 +178,10 @@ def test_snapshot_lists_newest_first(tmp_path):
     first = next(line for line in text.splitlines() if line.startswith("1)"))
     assert "newerB" in first, f"「刚发来的」必须排在第 1 条：{first}"
 
-    rid, _why = p._pick_report(UMO, "", "")
-    assert rid == "newerB", "默认读取要和快照第 1 条指向同一份"
+    cand = asyncio.run(p.tool_get_group_report(Event(), report_id=""))
+    newest_line = next(line for line in cand.splitlines() if "newerB" in line)
+    assert "最近投递" in newest_line, f"候选里要标出哪份是最近投递：{newest_line}"
+    assert "刚发来的" in newest_line
 
 
 # ---------------------------------------------------------------- 正文可读性

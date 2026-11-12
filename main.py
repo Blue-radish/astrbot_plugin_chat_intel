@@ -231,7 +231,7 @@ def split_cfg_list(value: object) -> list[str]:
     return out
 
 
-@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.25")
+@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.26")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -758,7 +758,7 @@ class TechDigestPlugin(Star):
         """
         for gid in self.group_ids:
             await self._group_name(gid)  # 预热群名，否则按名字匹配不到群
-        rng, gid, rest = self._resolve_request(text)
+        rng, gid, rest, range_txt = self._resolve_request(text)
         unknown = ""
         if rest and self.smart_parse and len(rest) >= 2:
             hint = await self._llm_parse_args(rest)
@@ -781,6 +781,17 @@ class TechDigestPlugin(Star):
             core = self._clean_text(rest)
             if self._looks_like_group(core):
                 unknown = core
+        core = self._strip_fillers(rest)
+        if not unknown and core and self._looks_like_time(core):
+            # 看起来是在给时间、但认不出来（2026-02-30、上个月…）。
+            # 以前这里悄悄退成增量（label=最新消息、incremental=True），用户以为按
+            # 2026-02-30 跑，实际跑的是「补一次最新」。宁可拒绝，也别按错的范围烧额度。
+            kind = "时间" if not range_txt else "参数"
+            return None, (
+                f"没认出{kind}「{core}」，这次就不生成了（免得按错的范围白跑一遍）。\n"
+                "时间可以用：今天 / 昨天 / 前天 / 本周 / 上周 / 最近3天 / 2026-11-05；"
+                "不带时间就是增量补一次最新消息。"
+            )
         if unknown:
             # 用户点名了某个群却对不上：不要退回「全部群」，那是白烧 token
             return None, (
@@ -968,6 +979,64 @@ class TechDigestPlugin(Star):
             name = await self._group_name(gid)
             parts.append(f"{name}（{gid}）" if name and name != gid else gid)
         return "、".join(parts)
+
+    _FILLERS = (
+        "上午",
+        "中午",
+        "下午",
+        "晚上",
+        "凌晨",
+        "最近",
+        "近期",
+        "这几天",
+        "这两天",
+        "报告",
+        "总结",
+        "日报",
+        "群聊情报",
+        "群聊",
+        "群里",
+        "群",
+        "一下",
+        "看看",
+        "生成",
+        "内容",
+        "记录",
+        "消息",
+        "左右",
+        "帮我",
+        "给我",
+        "的",
+        "吧",
+        "呢",
+        "啊",
+        "请",
+    )
+
+    _TIME_HINT = re.compile(
+        r"[\d零一二三四五六七八九十]|天|周|星期|月|日|号|年|点|时|分|上午|中午|下午|晚上|凌晨|最近|近期|上上?个?|本|这"
+    )
+
+    def _looks_like_time(self, text: str) -> bool:
+        """剩下的碎片像不像「在给时间」。
+
+        只在像时间的时候才拒绝：随口多说一句（「今天的聊了啥」剩下的「聊了啥」）
+        不该让命令失败，那属于闲聊；而「2026-02-30」「上个月」是明确的时间表达，
+        认不出来就必须说，不能悄悄按增量跑。
+        """
+        return bool(self._TIME_HINT.search(self._strip_fillers(text) or ""))
+
+    def _strip_fillers(self, text: str) -> str:
+        """剥掉不改变含义的填充词，剩下的才是「真的没认出来」。"""
+        core = self._clean_text(text or "")
+        changed = True
+        while changed and core:
+            changed = False
+            for word in self._FILLERS:
+                if word and word in core:
+                    core = self._clean_text(core.replace(word, " "))
+                    changed = True
+        return core
 
     @staticmethod
     def _looks_like_group(text: str) -> bool:
@@ -1677,7 +1746,7 @@ class TechDigestPlugin(Star):
 
 
     def _resolve_request(self, text: str):
-        """把一整句话解析成 (时间范围, 群号, 剩下的没认出来的碎片)。"""
+        """把一整句话解析成 (时间范围, 群号, 剩下的没认出来的碎片, 认出的时间原文)。"""
         rng, range_txt = self._match_range(text)
         gid, group_txt = self._match_group(text)
         rest = text or ""
@@ -1694,7 +1763,7 @@ class TechDigestPlugin(Star):
             ).strip()
         if rng is None:
             rng = (0.0, time.time(), "最新消息", True)
-        return rng, gid, rest
+        return rng, gid, rest, (range_txt or "")
 
     async def _llm_parse_args(self, text: str) -> tuple[str, str] | None:
         """规则没认出来的碎片，交给模型翻译成 {date, group}。"""
@@ -3022,7 +3091,9 @@ class TechDigestPlugin(Star):
         ok = await self._deliver_report(umo, path)
         if not ok:
             return f"报告 {rid} 没能发出去（发送失败）。请把失败告诉用户，不要重复发送。"
-        return f"受理结果=sent。报告 {rid} 已重新发到本会话；停止输出。"
+        return (
+            f"受理结果=sent。报告 {rid}（{self._report_tag(rid)}）已重新发到本会话；停止输出。"
+        )
 
     @filter.llm_tool(name="digest_status")
     async def tool_digest_status(self, event: AstrMessageEvent) -> str:
@@ -3038,13 +3109,23 @@ class TechDigestPlugin(Star):
         if not self._tool_allowed(event):
             return "这个工具只能在私聊里由主人使用；群里不会发任何报告。"
         lines = await self._status_lines()
-        queue_rows = [req for req in self._queue if req is not None]
+        # 定时档在队列里是 None：既不能算「没有」，也不能当成用户请求去念它的 label
+        queue_rows = list(self._queue)
         running = getattr(self, "_current_req", None)
-        tasks = [f"在跑：{running.label}｜群 {running.gid or '全部'}"] if running else ["在跑：无"]
+        busy = bool(self._running) or bool(queue_rows)
+        if running is not None:
+            tasks = [f"在跑：{running.label}｜群 {running.gid or '全部'}"]
+        elif self._running:
+            tasks = ["在跑：定时任务（自动推送）"]
+        else:
+            tasks = ["在跑：无"]
         if queue_rows:
-            tasks.append(f"排队：{len(queue_rows)} 份（" + "、".join(r.label for r in queue_rows[:3]) + "）")
+            labels = [r.label if r is not None else "定时任务" for r in queue_rows[:3]]
+            tasks.append(f"排队：{len(queue_rows)} 份（" + "、".join(labels) + "）")
         else:
             tasks.append("排队：0 份")
+        if not busy:
+            tasks.append("（现在没有任务在跑）")
         return "\n".join(lines + tasks)
 
     # ------------------------------------------------------------------ 读取已有报告
@@ -3178,42 +3259,6 @@ class TechDigestPlugin(Star):
         )
         return "\n".join(lines)
 
-    def _pick_report(self, umo: str, report_id: str, gid: str) -> tuple[str, str]:
-        """选一份报告：显式 id > 指定群 > 当前讨论焦点 > 会话最近一份 > 全局最新。"""
-        if report_id.strip():
-            return reports.report_id_from_image(report_id.strip()), ""
-        entries = [e for e in reports.entries(self.state, umo) if e.get("id")]
-        if gid:
-            for entry in reversed(entries):
-                if entry.get("gid") == gid and reports.status_of(entry) != "expired":
-                    return str(entry.get("id") or ""), ""
-            found = reports.newest(self.reports_dir, gid, 1)
-            if found:
-                return found[0], ""
-            return "", f"群 {gid} 还没有保存过的报告（报告与原文都保留 {self.keep_days} 天）。"
-        focus = reports.get_focus(self.state, umo)
-        focused = str(focus.get("report_id") or "")
-        if focused and (
-            reports.load(self.reports_dir, focused) or reports.image_of(self.reports_dir, focused)
-        ):
-            return focused, ""
-        # 没有可用焦点时先看投递记录：索引会被 INDEX_KEEP 裁掉，投递记录不会，
-        # 所以它比索引用接近用户嘴里的「刚发来的那份」。
-        for record in reversed(reports.deliveries(self.state, umo)):
-            shipped = str(record.get("report_id") or "")
-            if shipped and (
-                reports.load(self.reports_dir, shipped)
-                or reports.image_of(self.reports_dir, shipped)
-            ):
-                return shipped, ""
-        usable = [e for e in entries if reports.status_of(e) not in ("expired", "failed")]
-        if usable:
-            return str(usable[-1].get("id") or ""), ""
-        found = reports.newest(self.reports_dir, None, 1)
-        if found:
-            return found[0], ""
-        return "", "还没有可以读取的报告：先让我生成一份（group_digest），之后才能讨论它。"
-
     def _report_tag(self, report_id: str) -> str:
         """报告的人话标签（群｜范围），让「正在讨论的那份」能和别的区分开。"""
         record = reports.load(self.reports_dir, report_id) or {}
@@ -3221,45 +3266,85 @@ class TechDigestPlugin(Star):
         label = record.get("label") or "范围未知"
         return f"{group}｜{label}"
 
-    def _report_candidates(self, umo: str, limit: int = 3) -> str:
-        """列候选给模型挑：它不能靠「后端默认值」蒙一份报告的身份。"""
+    def _record_gid(self, report_id: str) -> str:
+        """这份报告属于哪个群（读不到就返回空串，不猜）。"""
+        record = reports.load(self.reports_dir, report_id) or {}
+        return str(record.get("gid") or "")
+
+    def _report_candidates(self, umo: str, gid: str = "", limit: int = 3) -> str:
+        """列候选给模型挑：它不能靠「后端默认值」蒙一份报告的身份。
+
+        两处坑（审查复现过）：
+
+        1. 去重顺序错了会把旧报告标成「刚发来的」——最近投递必须在去重之前算出来，
+           否则焦点刚好等于最近投递时，第二份就被认成最新的那份。
+        2. `gid` 只能用来**过滤候选**，不能替代身份。只给群名时同一群有两份报告，
+           后端一猜就等于把「选哪份」的责任又拿回来了（猜中没人知道，猜错悄悄换焦点）。
+        """
+        focus = str(reports.get_focus(self.state, umo).get("report_id") or "")
+        # 最近投递先算出来：后面按 id 去重，不能等到遍历时才发现「还空着」
+        shipped_ids = [
+            str(r.get("report_id") or "")
+            for r in reversed(reports.deliveries(self.state, umo))
+            if r.get("report_id")
+        ]
+        newest = shipped_ids[0] if shipped_ids else ""
+        stamps = {
+            str(r.get("report_id") or ""): reports._fmt_delivered_at(r.get("delivered_at"))
+            for r in reports.deliveries(self.state, umo)
+            if r.get("report_id")
+        }
+        order: list[str] = []
+        if focus:
+            order.append(focus)
+        order.extend(shipped_ids)
+        order.extend(
+            str(e.get("id") or "")
+            for e in reversed([e for e in reports.entries(self.state, umo) if e.get("id")])
+        )
         rows: list[str] = []
         seen: set[str] = set()
-        focus = str(reports.get_focus(self.state, umo).get("report_id") or "")
-        if focus:
-            rows.append(
-                f"- {focus}｜{self._report_tag(focus)}｜正在讨论中"
-                " ← 用户说「正在讨论」「这条」「刚才聊的那份」指的是它"
-            )
-            seen.add(focus)
-        newest_delivery = ""
-        for record in reversed(reports.deliveries(self.state, umo)):
-            rid = str(record.get("report_id") or "")
-            if rid and rid not in seen:
-                stamp = reports._fmt_delivered_at(record.get("delivered_at"))
-                group = record.get("group") or "群未知"
-                label = record.get("range_label") or "范围未知"
-                line = f"- {rid}｜{group}｜{label}｜发过 {stamp}"
-                if not newest_delivery:
-                    line += " ← 用户说「刚发来的」「刚才那张图」指的是它"
-                    newest_delivery = rid
-                rows.append(line)
-                seen.add(rid)
-            if len(rows) >= limit + 1:
-                break
-        for entry in reversed([e for e in reports.entries(self.state, umo) if e.get("id")]):
-            rid = str(entry.get("id") or "")
-            if rid and rid not in seen:
-                rows.append(f"- {rid}｜群 {entry.get('gid') or '?'}｜{entry.get('label') or '范围未知'}｜只有存档")
-                seen.add(rid)
+        for rid in order:
+            if not rid or rid in seen:
+                continue
+            if gid and self._record_gid(rid) != gid:
+                continue
+            seen.add(rid)
+            marks = []
+            if rid == focus:
+                marks.append("正在讨论中")
+            if rid == newest:
+                marks.append("最近投递")
+            stamp = stamps.get(rid)
+            line = f"- {rid}｜{self._report_tag(rid)}"
+            if marks:
+                line += "｜" + "·".join(marks)
+            if stamp:
+                line += f"｜发过 {stamp}"
+            elif not marks:
+                line += "｜只有存档"
+            hints = []
+            if rid == focus:
+                hints.append("「正在讨论」「这条」「刚才聊的那份」")
+            if rid == newest:
+                hints.append("「刚发来的」「刚才那张图」")
+            if hints:
+                line += " ← " + "、".join(hints) + "指的是它"
+            rows.append(line)
             if len(rows) >= limit + 2:
                 break
         if not rows:
+            if gid:
+                return (
+                    f"群 {gid} 没有能读的报告（报告与原文都保留 {self.keep_days} 天）。"
+                    "要新的就调 group_digest 生成一份。"
+                )
             return "还没有可以读取的报告：先让我生成一份（group_digest），之后才能讨论它。"
         return (
             "没给 report_id，我不猜——猜错会把正在讨论的那份换掉。请从下面挑一个原样传回来：\n"
             + "\n".join(rows)
-            + "\n还不确定就问用户指的是哪一份，别自己选。"
+            + "\n说「正在讨论的那份」就用标着「正在讨论中」的那个 ID；说「刚发来的」就用标着"
+            "「最近投递」的那个。还不确定就问用户，别自己选。"
         )
 
     @filter.llm_tool(name="get_group_report")
@@ -3289,11 +3374,12 @@ class TechDigestPlugin(Star):
                 # 写错群名不许悄悄回退到别的群：那会答错对象
                 return f"没有「{gid}」这个群。现在配好的群：{await self._known_groups_text()}"
             wanted_gid = hit
-        if not report_id.strip() and not wanted_gid:
-            return self._report_candidates(umo)
-        rid, why = self._pick_report(umo, report_id, wanted_gid)
-        if not rid:
-            return why
+        rid_arg = report_id.strip()
+        if not rid_arg:
+            # 缺 ID 一律返回候选：gid 只是过滤器，不是身份。
+            # 同一群有两份报告时，「按群取最新」就是后端替模型选——猜错了没人知道。
+            return self._report_candidates(umo, gid=wanted_gid)
+        rid = reports.report_id_from_image(rid_arg) or rid_arg
         record = reports.load(self.reports_dir, rid)
         if record is None:
             if reports.image_of(self.reports_dir, rid):
@@ -3305,12 +3391,17 @@ class TechDigestPlugin(Star):
                 f"找不到报告 {rid}：可能已过保留期（报告与原文都保留 {self.keep_days} 天），"
                 "或者这个 id 不对。可以让我重新生成一份。"
             )
+        if wanted_gid and str(record.get("gid") or "") not in ("", wanted_gid):
+            return (
+                f"报告 {rid} 属于「{self._report_tag(rid)}」，不是你提到的那个群。"
+                "换个匹配的报告 ID，或者把群参数去掉。"
+            )
         text = self._format_report(record, int(topic_no or 0))
         # 记下讨论焦点：下一轮省略 ID 时接着聊这份，而不是跳回最新一份
         reports.set_focus(self.state, umo, rid, int(topic_no or 0))
         self._save_state()
         # 回显身份：模型下一轮不必再猜「刚读的是哪份」
-        return f"（已读报告 {rid}）\n{text}"
+        return f"（已读报告 {rid}｜{self._report_tag(rid)}）\n{text}"
 
     async def _scan_records(self, gid: str, since: float, until: float) -> list[dict]:
         """查询专用：先取全再匹配，不按「总结上限」截断。

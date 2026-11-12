@@ -425,8 +425,12 @@ def test_delivery_does_not_steal_the_discussion_focus(tmp_path):
     assert shipped[-1]["stored"] is True
 
 
-def test_focus_absent_falls_back_to_latest_delivery(tmp_path):
-    """没有焦点时，「刚发来的那份」按投递记录选，而不是按索引猜。"""
+def test_focus_absent_still_marks_the_latest_delivery(tmp_path):
+    """没有焦点时，「刚发来的那份」的依据是投递记录，而不是索引顺序。
+
+    注意：这里不再断言「后端会自动选中 newer」——后端不替模型选，
+    它只把 newer 标成「最近投递」交出去。
+    """
     p = make(tmp_path)
     older = build_report(
         tmp_path, "older", [], "上午", ["旧话题"], time.time() - 7200, time.time() - 3600
@@ -443,8 +447,12 @@ def test_focus_absent_falls_back_to_latest_delivery(tmp_path):
     ]
     reports.append_delivery(p.state, UMO, report_id="newer", group="群", range_label="刚才")
 
-    rid, _why = p._pick_report(UMO, "", "")
-    assert rid == "newer", "无焦点时应优先最近成功投递的那份"
+    cand = asyncio.run(p.tool_get_group_report(Ev(), report_id=""))
+    newest_line = next(line for line in cand.splitlines() if "newer" in line and "最近投递" in line)
+    assert "刚发来的" in newest_line, newest_line
+    assert "older" in cand and "最近投递" not in next(
+        line for line in cand.splitlines() if "older" in line
+    )
 
 
 def test_failed_delivery_keeps_the_old_focus(tmp_path):

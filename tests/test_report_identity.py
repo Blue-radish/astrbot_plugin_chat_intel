@@ -48,13 +48,13 @@ def make(tmp_path):
     return p, mod, dir_path
 
 
-def seed(p, root, rid, *, group="極東電子考古學結社"):
+def seed(p, root, rid, *, group="極東電子考古學結社", gid=GID):
     """造一份图文都在的报告，并把它记成「已投递过」。"""
     root.mkdir(parents=True, exist_ok=True)
     (root / f"{rid}.png").write_bytes(b"png")
     record = {
         "id": rid,
-        "gid": GID,
+        "gid": gid,
         "group": group,
         "label": "今天",
         "generated_at": 1_800_000_000,
@@ -172,3 +172,65 @@ def test_status_says_nothing_is_running(tmp_path):
     p._status_lines = lambda: asyncio.sleep(0, result=[])
     out = asyncio.run(p.tool_digest_status(Ev()))
     assert "在跑：无" in out and "排队：0 份" in out
+
+
+def test_gid_alone_does_not_pick_a_report(tmp_path):
+    """同一群两份报告、焦点是 A 时只给群名：不许替模型选一份，更不许切焦点。"""
+    p, _mod, root = make(tmp_path)
+    seed(p, root, "storyA")
+    seed(p, root, "freshB")
+    reports.set_focus(p.state, UMO, "storyA", 1)
+    out = asyncio.run(p.tool_get_group_report(Ev(), gid="極東"))
+    assert "没给 report_id" in out, "只给群名等于把选哪份的责任又交回后端"
+    assert "storyA" in out and "freshB" in out
+    assert reports.get_focus(p.state, UMO)["report_id"] == "storyA", "拒绝时焦点不许动"
+
+
+def test_gid_only_works_as_a_filter(tmp_path):
+    p, _mod, root = make(tmp_path)
+    seed(p, root, "storyA")
+    seed(p, root, "freshB", group="别的群", gid="220002")
+    out = asyncio.run(p.tool_get_group_report(Ev(), gid="極東"))
+    assert "storyA" in out
+    assert "freshB" not in out, "gid 只该过滤候选"
+
+
+def test_receipt_carries_group_and_range(tmp_path):
+    p, _mod, root = make(tmp_path)
+    seed(p, root, "storyA")
+    out = asyncio.run(p.tool_get_group_report(Ev(), report_id="storyA"))
+    assert "已读报告 storyA｜極東電子考古學結社｜今天" in out
+
+
+def test_newest_delivery_marker_survives_dedupe(tmp_path):
+    """焦点恰好等于最近投递时，旧报告不能被标成「刚发来的」。"""
+    p, _mod, root = make(tmp_path)
+    seed(p, root, "oldA")          # 先投递 A
+    seed(p, root, "freshB")        # 再投递 B
+    reports.set_focus(p.state, UMO, "freshB", 1)   # 随后读了 B
+    out = asyncio.run(p.tool_get_group_report(Ev(), report_id=""))
+    assert "freshB｜極東電子考古學結社｜今天｜正在讨论中·最近投递" in out
+    assert "oldA" in out
+    old_line = next(line for line in out.splitlines() if line.startswith("- oldA"))
+    assert "最近投递" not in old_line, "A 比 B 旧，不能被标成刚发来的"
+    assert "刚发来的" not in old_line
+
+
+def test_group_report_mismatch_is_refused(tmp_path):
+    p, _mod, root = make(tmp_path)
+    seed(p, root, "storyA", group="極東電子考古學結社")
+    out = asyncio.run(p.tool_get_group_report(Ev(), report_id="storyA", gid="别的群"))
+    assert "不是你提到的那个群" in out or "没有「别的群」这个群" in out
+    assert reports.get_focus(p.state, UMO).get("report_id") != "storyA"
+
+
+def test_status_counts_scheduled_jobs(tmp_path):
+    """定时档在队列里是 None，别把它滤掉说「无任务」。"""
+    p, _mod, _root = make(tmp_path)
+    p._status_lines = lambda: asyncio.sleep(0, result=[])
+    p._running = True
+    p._current_req = None
+    p._queue.append(None)
+    out = asyncio.run(p.tool_digest_status(Ev()))
+    assert "在跑：定时任务" in out
+    assert "排队：1 份（定时任务）" in out

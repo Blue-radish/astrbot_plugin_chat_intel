@@ -119,3 +119,33 @@ def test_rejected_when_queue_is_full():
     out = run_command(p, Ev(), arg="今天")
     assert "排着" in out[0]
     assert len(p._queue) == 2
+
+
+def test_invalid_date_is_refused_not_silently_incremental():
+    """`2026-02-30` 认不出来就说认不出来，别悄悄按「补一次最新」跑。"""
+    p, submitted = make(mock_submit=False)
+    out = run_command(p, Ev(), arg="2026-02-30 测试群")
+    assert submitted == []
+    assert "没认出时间" in out[0]
+    assert "今天 / 昨天" in out[0], "要给出能用的写法"
+    assert not p._queue, "拒绝时不许提交"
+
+
+def test_unknown_month_word_is_refused():
+    p, submitted = make(mock_submit=False)
+    out = run_command(p, Ev(), arg="上个月 测试群")
+    assert "没认出时间" in out[0]
+    assert not p._queue
+
+
+def test_plain_chatter_after_time_is_not_an_error():
+    """「今天的聊了啥」剩下的「聊了啥」是闲聊，不该让命令失败。"""
+    p, submitted = make()
+    out = run_command(p, Ev(), arg="今天的聊了啥")
+    assert submitted and submitted[0].label == "今天"
+
+
+def test_no_argument_means_incremental():
+    p, submitted = make()
+    run_command(p, Ev(), arg="")
+    assert submitted and submitted[0].incremental is True
