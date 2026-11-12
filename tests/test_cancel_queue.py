@@ -184,3 +184,91 @@ class FakeEvent:
         from types import SimpleNamespace
 
         return SimpleNamespace(chain=[SimpleNamespace(text=text)])
+
+
+def test_cancel_reaches_the_manual_job_a_scheduled_run_handed_off():
+    """定时先跑、手动排队、定时结束后手动接着跑——这时叫停必须能找到它。
+
+    以前 `_current_task` 只在手动提交时赋值，定时入口直接 `await self._execute(None)`，
+    接续的手动请求没有任务登记，取消逻辑只能说「现在没有在跑或排队的生成」。
+    """
+
+    async def scenario():
+        p, mod, _sent = fresh()
+        cancelled = []
+
+        async def daily():
+            await asyncio.sleep(0)
+
+        async def slow_manual(*_a, **_kw):
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                cancelled.append(True)
+                raise
+
+        p._run_daily_once = daily
+        p._generate_and_send = slow_manual
+        p._spawn = lambda coro: asyncio.create_task(coro)
+        p._tasks = set()
+
+        # 走定时入口：占位 → 起任务（和 main.py 里 23:00 触发那段一致）
+        assert p._claim() is True
+        p._current_req = None
+        p._current_task = p._spawn(p._execute(None))
+
+        other = mod.DigestRequest(UMO, 0, 1, "今天", True, GID)
+        assert p._enqueue(other), "手动请求要排进队列"
+        await asyncio.sleep(0.05)
+        assert p._current_req is other, "定时结束后应接着跑手动那份"
+
+        message = await p.cancel_digest(UMO)
+        assert "掐掉" in message, f"应该真的取消，而不是说没在跑：{message}"
+        await asyncio.sleep(0.05)
+        assert cancelled == [True], "手动任务要真的被取消"
+        assert p._running is False
+        assert p._current_task is None
+
+    asyncio.run(scenario())
+
+
+def test_cancel_before_the_loop_starts_still_drains_the_queue():
+    """提交后立刻取消（函数体一次都没跑）：排队的那份必须被接上。
+
+    这条路径只有 done 回调会执行，`_execute` 的 finally/except 都不会跑。
+    """
+
+    async def scenario():
+        p, mod, _sent = fresh()
+        ran = []
+
+        async def slow_manual(*_a, **_kw):
+            await asyncio.sleep(30)
+
+        async def next_one():
+            ran.append("daily")
+
+        p._generate_and_send = slow_manual
+        p._spawn = lambda coro: asyncio.create_task(coro)
+        p._tasks = set()
+
+        first = mod.DigestRequest(UMO, 0, 1, "今天", True, GID)
+        p._running = True
+        p._current_req = first
+        p._current_task = p._spawn(p._execute(first))
+        # 排队的必须是「别人的/定时的」任务：取消只清本会话自己的排队，
+        # 定时档（None）正是审查者说的那种「后面还有其他任务」。
+        assert p._enqueue(None)
+
+        # 还没让它跑过任何一步就取消
+        message = await p.cancel_digest(UMO)
+        assert "掐掉" in message
+        p._run_daily_once = next_one  # 接续的定时档要走得快
+        await asyncio.sleep(0.1)
+
+        assert ran == ["daily"], "启动前被取消，也要把队列接上（以前会卡在队列里直到重启）"
+        assert p._user_cancelled is False, "取消标记要复位，否则下一次取消会误判"
+        assert p._running is False
+        assert not p._queue
+
+    asyncio.run(scenario())

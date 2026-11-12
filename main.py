@@ -231,7 +231,7 @@ def split_cfg_list(value: object) -> list[str]:
     return out
 
 
-@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.27")
+@register(PLUGIN_NAME, "Ray", "群聊情报：每个群一份标签，把群友聊出来的话题整理成一张长图，视觉模型筛图，本地排版，静默私聊投递；报告可回头讨论、按证据回应追问", "2.2.28")
 class TechDigestPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -738,6 +738,12 @@ class TechDigestPlugin(Star):
                 # 只清「自己那一份」的状态：清早了会抹掉下一个任务的运行标记。
                 if getattr(self, "_current_task", None) is not finished:
                     return
+                if getattr(self, "_user_cancelled", False) and not getattr(
+                    self, "_unloading", False
+                ):
+                    # 启动前就被取消：函数体没跑过，没人接队列，这里补上
+                    self._continue_queue_after_cancel()
+                    return
                 self._running = False
                 self._current_req = None
                 self._current_task = None
@@ -906,6 +912,34 @@ class TechDigestPlugin(Star):
         self._queue.append(request)
         return True
 
+    def _continue_queue_after_cancel(self) -> None:
+        """用户叫停之后的统一收尾：清标记，并把排队的那份重新接上。
+
+        两条取消路径共用这里：
+        - 任务已经在跑：`_execute` 自己捕获 CancelledError，收尾后原地继续吃队列；
+        - 任务还没被调度就取消（函数体一次都没跑）：只有 done 回调会执行，
+          这时得在这里把队列接上，否则定时档会卡在队列里直到重启。
+        """
+        self._user_cancelled = False
+        self._current_req = None
+        self._current_task = None
+        if not self._queue:
+            self._running = False
+            return
+        request = self._queue.popleft()
+        self._running = True
+        self._current_req = request
+        try:
+            self._current_task = self._spawn(self._execute(request))
+        except Exception as e:  # noqa: BLE001
+            self._running = False
+            self._current_req = None
+            logger.error(f"[{PLUGIN_NAME}] 取消后接续队列失败: {e}", exc_info=True)
+            return
+        logger.info(
+            f"[{PLUGIN_NAME}] 取消后接续队列（队列还剩 {len(self._queue)} 份）"
+        )
+
     def _spawn(self, coro) -> asyncio.Task:
         """起一个后台任务并**持有引用**。
 
@@ -934,6 +968,9 @@ class TechDigestPlugin(Star):
         进入这里时执行位已经由 `_claim()` 同步占上；之后每吃完一份都要重新抢一次。
         request=None 表示定时档。
         """
+        # 无论从哪个入口进来（手动提交、定时调度、取消后接续），都把自己的任务登记上：
+        # 取消逻辑靠 `_current_task` 找得到人，否则「定时跑完接着跑手动」的那一份谁也取消不了。
+        self._current_task = asyncio.current_task()
         while True:
             # 记下「现在在跑哪一份」：用户叫停时要靠它判断该不该掐（定时档是 None，不掐）
             self._current_req = request
@@ -983,6 +1020,7 @@ class TechDigestPlugin(Star):
                 self._running = False
                 self._current_req = None
             if not self._queue:
+                self._current_task = None
                 return
             request = self._queue.popleft()
             self._running = True
@@ -2876,7 +2914,15 @@ class TechDigestPlugin(Star):
                                 )
                         else:
                             self._last_run_date = today
-                            await self._execute(None)
+                            # 起成独立任务，和手动提交走同一套登记：
+                            # ① 之后从队列里接续的手动请求能被 cancel 找到（_current_task 有人指）；
+                            # ② 取消/异常只影响这一次定时，调度循环本身还活着。
+                            self._current_req = None
+                            try:
+                                self._current_task = self._spawn(self._execute(None))
+                            except Exception:
+                                self._running = False
+                                raise
             except asyncio.CancelledError:
                 raise
             except Exception as e:

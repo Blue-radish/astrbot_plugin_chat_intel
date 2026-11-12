@@ -9,12 +9,14 @@
 
 用法：
     python tools/e2e_client.py --port 6239 --token <ws_reverse_token> --self-id 2000000001 \
-        --owner 1679956404 --say "现在跑到哪了？" --say "做得真好，这个群总结"
+        --owner 1679956404 --say "现在跑到哪了？" --say "生成今天电脑互助群的报告::image"
+（`::image` 表示这条要等到图片：回执之后没声音不等于生成完成。）
 
 注意：
   * 报告图是 base64 传的，客户端**必须**开 max_msg_size=0，否则大图会把连接挤断，
     看起来像「插件发送失败」，其实是假客户端太小气；
-  * 每条消息之间按「安静 quiet 秒」判断一轮说完，避免用固定 sleep 猜时序。
+  * 每条消息按「安静 quiet 秒且期间没有新增」判断说完；计数分「本轮开始」和「上次观察」
+    两个，否则收到第一条之后会一直刷新活动时间，白等满 timeout。
 """
 
 import argparse
@@ -82,12 +84,31 @@ async def reader(ws):
         )
 
 
+def parse_step(raw):
+    """把 `--say` 的一项拆成 (文字, 期望)。
+
+    现在只有 `image` 一种期望：这条要等到图。抽成函数是为了能单测——
+    「等图」的判断错了，验收报告就会把「回执之后安静下来」当成生成完成。
+    """
+    text, _, want = raw.partition("::")
+    return text.strip(), want.strip()
+
+
 async def settle(quiet, timeout):
+    """等到「安静 quiet 秒」为止，返回这期间收到的消息。
+
+    计数要分开记：`start` 是本轮开始时的条数，`seen` 是上一次观察到的条数。
+    只有**新增**回复才刷新活动时间——以前用 `len(REPLIES) > start` 判断，
+    收到第一条之后就永远成立，每轮都刷新，等于必然白等满 timeout。
+    """
     start = len(REPLIES)
-    begin = last = time.time()
+    seen = start
+    begin = time.time()
+    last = begin
     while time.time() - begin < timeout:
         await asyncio.sleep(0.5)
-        if len(REPLIES) > start:
+        if len(REPLIES) > seen:
+            seen = len(REPLIES)
             last = time.time()
         elif time.time() - last >= quiet:
             break
@@ -103,6 +124,12 @@ async def main():
     ap.add_argument("--say", action="append", default=[])
     ap.add_argument("--quiet", type=float, default=8.0)
     ap.add_argument("--timeout", type=float, default=180.0)
+    ap.add_argument(
+        "--image-timeout",
+        type=float,
+        default=600.0,
+        help="带 ::image 的消息等图上限（生成要几分钟，默认 10 分钟）",
+    )
     args = ap.parse_args()
 
     headers = {"X-Self-ID": str(args.self_id), "X-Client-Role": "Universal"}
@@ -115,11 +142,28 @@ async def main():
             log("连接", f"ws://127.0.0.1:{args.port}/ws")
             task = asyncio.create_task(reader(ws))
             await asyncio.sleep(1.0)
-            for text in args.say:
-                log("← 我:", text)
+            for raw in args.say:
+                # 写成 "……::image" 表示这条要等到图（生成类请求用）
+                text, want = parse_step(raw)
+                log("← 我:", text + ("（等图）" if want == "image" else ""))
                 await ws.send_json(make_event(text, args.self_id, args.owner))
+                start = len(REPLIES)
                 got = await settle(args.quiet, args.timeout)
-                log("   小结", f"收到 {len(got)} 条，图片={any('[图片]' in g['text'] for g in got)}")
+                if want == "image":
+                    # 回执之后没声音 ≠ 生成完成：图（或明确的失败回执）才是终态
+                    deadline = time.time() + args.image_timeout
+                    while (
+                        not any("[图片]" in g["text"] for g in got)
+                        and time.time() < deadline
+                    ):
+                        await asyncio.sleep(1.0)
+                        got = REPLIES[start:]
+                    if not any("[图片]" in g["text"] for g in got):
+                        log("   !! 没等到图", f"{args.image_timeout:.0f}s 内没有图片")
+                log(
+                    "   小结",
+                    f"收到 {len(got)} 条，图片={any('[图片]' in g['text'] for g in got)}",
+                )
             task.cancel()
             await asyncio.sleep(0.3)
             print("\n=== 全部回包 ===")
