@@ -259,7 +259,8 @@ tests/              # 离线测试
 「没配主人」这类配置提示）、配图和报告存档。`tools/model_accept.py` 是真实模型验收脚本（不属于测试
 套件，需要本机配置好的对话模型），用来逐条核对「自然语言 → 工具 → 后端结果」是否符合标注；
 判定逻辑在 `tools/accept_judge.py`，由 `tests/test_accept_judge.py` 单独覆盖——判定本身也会错，
-错了比模型答错更难发现。
+错了比模型答错更难发现。`tools/e2e_platform.py` + `tools/e2e_client.py` 用来做「不占用真 QQ」的
+会话级验收：临时加一个反向 WS 端口，用假客户端替主人发消息，AstrBot、插件、模型、出图全是真的。
 `templates/` 保存报告模板。
 
 ## 开发
