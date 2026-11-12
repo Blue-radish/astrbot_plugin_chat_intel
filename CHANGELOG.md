@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.2.30 — 2026-11-12
+
+**面板上补一行「支持哪些平台」。**
+
+`metadata.yaml` 加了 `support_platforms: [aiocqhttp]`，AstrBot 面板的插件卡片会显示
+「支持 1 个平台 · aiocqhttp (OneBot v11)」，安装/更新弹窗里也会写。这个字段只用于展示，
+不影响运行——但确实只有 OneBot v11 能用：拉群历史走的是 `get_group_msg_history`，
+别的适配器没这个接口，所以不写「全平台通用」。
+
 ## 2.2.29 — 2026-11-12
 
 **两处文档／工具收尾，改完进合并流程。**
