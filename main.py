@@ -2914,20 +2914,26 @@ class TechDigestPlugin(Star):
                                 )
                         else:
                             self._last_run_date = today
-                            # 起成独立任务，和手动提交走同一套登记：
-                            # ① 之后从队列里接续的手动请求能被 cancel 找到（_current_task 有人指）；
-                            # ② 取消/异常只影响这一次定时，调度循环本身还活着。
-                            self._current_req = None
-                            try:
-                                self._current_task = self._spawn(self._execute(None))
-                            except Exception:
-                                self._running = False
-                                raise
+                            self._start_daily_run()
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 logger.error(f"[{PLUGIN_NAME}] 定时任务异常: {e}", exc_info=True)
             await asyncio.sleep(30)
+
+    def _start_daily_run(self) -> None:
+        """定时档起跑：占位 → 起独立任务（和手动提交走同一套登记）。
+
+        以前是 `await self._execute(None)` 直接跑在调度循环里，两个后果：
+        ① 之后从队列接续的手动请求没有 `_current_task` 可取消；
+        ② 取消或异常会把整个调度循环一起弄死，后面的定时再也不会触发。
+        """
+        self._current_req = None
+        try:
+            self._current_task = self._spawn(self._execute(None))
+        except Exception:
+            self._running = False
+            raise
 
     async def _run_daily_once(self) -> None:
         """定时档的一次执行：过去 24 小时、所有群、非增量、直接推送。

@@ -212,10 +212,9 @@ def test_cancel_reaches_the_manual_job_a_scheduled_run_handed_off():
         p._spawn = lambda coro: asyncio.create_task(coro)
         p._tasks = set()
 
-        # 走定时入口：占位 → 起任务（和 main.py 里 23:00 触发那段一致）
+        # 走定时入口的生产代码：占位 → _start_daily_run()（23:00 触发那段就是这一句）
         assert p._claim() is True
-        p._current_req = None
-        p._current_task = p._spawn(p._execute(None))
+        p._start_daily_run()
 
         other = mod.DigestRequest(UMO, 0, 1, "今天", True, GID)
         assert p._enqueue(other), "手动请求要排进队列"
