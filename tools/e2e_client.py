@@ -16,7 +16,9 @@
   * 报告图是 base64 传的，客户端**必须**开 max_msg_size=0，否则大图会把连接挤断，
     看起来像「插件发送失败」，其实是假客户端太小气；
   * 每条消息按「安静 quiet 秒且期间没有新增」判断说完；计数分「本轮开始」和「上次观察」
-    两个，否则收到第一条之后会一直刷新活动时间，白等满 timeout。
+    两个，否则收到第一条之后会一直刷新活动时间，白等满 timeout；
+  * 退出码：全部期望满足才 0。等图超时、某条没有任何回包都记为失败并以 1 退出——
+    自动化验收只会看退出码，不能让它把超时当通过。
 """
 
 import argparse
@@ -28,6 +30,7 @@ import aiohttp
 
 T0 = time.time()
 REPLIES = []
+FAILURES = []  # 验收失败项：有内容就以非零退出码结束，别让自动化把超时当通过
 _seq = [0]
 
 
@@ -82,6 +85,11 @@ async def reader(ws):
                 "echo": payload.get("echo"),
             }
         )
+
+
+def exit_code():
+    """有失败项就返回 1：退出码是自动化唯一会看的东西。"""
+    return 1 if FAILURES else 0
 
 
 def parse_step(raw):
@@ -159,7 +167,10 @@ async def main():
                         await asyncio.sleep(1.0)
                         got = REPLIES[start:]
                     if not any("[图片]" in g["text"] for g in got):
+                        FAILURES.append(f"等图超时（{args.image_timeout:.0f}s）：{text}")
                         log("   !! 没等到图", f"{args.image_timeout:.0f}s 内没有图片")
+                if not got:
+                    FAILURES.append(f"没有任何回包：{text}")
                 log(
                     "   小结",
                     f"收到 {len(got)} 条，图片={any('[图片]' in g['text'] for g in got)}",
@@ -169,6 +180,10 @@ async def main():
             print("\n=== 全部回包 ===")
             for r in REPLIES:
                 print(f"  {r['t']:6.1f}s {r['text'][:120]}")
+            if FAILURES:
+                print(f"\n=== 失败 {len(FAILURES)} 项（退出码 1）===")
+                for item in FAILURES:
+                    print(f"  - {item}")
 
 
 if __name__ == "__main__":
@@ -176,3 +191,5 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+    # 超时/空回包不算通过：脚本的退出码就是自动化验收的判据
+    raise SystemExit(exit_code())

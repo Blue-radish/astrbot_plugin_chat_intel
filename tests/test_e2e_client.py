@@ -64,3 +64,36 @@ def test_parse_step_marks_image_requests():
     assert e2e.parse_step("生成今天的报告::image") == ("生成今天的报告", "image")
     assert e2e.parse_step("现在跑到哪了？") == ("现在跑到哪了？", "")
     assert e2e.parse_step("  带空格  :: image ") == ("带空格", "image")
+
+
+def test_timeout_marks_failure_so_automation_sees_nonzero_exit():
+    """等图超时不能算通过：退出码是自动化验收唯一的判据。"""
+    e2e.FAILURES.clear()
+    assert e2e.exit_code() == 0, "没失败时退出码应为 0"
+
+    e2e.FAILURES.append("等图超时（600s）：生成今天的报告")
+    assert e2e.exit_code() == 1, "超时必须以非零退出码结束"
+
+    e2e.FAILURES.append("没有任何回包：现在跑到哪了？")
+    assert e2e.exit_code() == 1
+    e2e.FAILURES.clear()
+
+
+def test_image_wait_records_failure_when_nothing_arrives():
+    """等到图才算数：只有文字回包（比如只回了「开始生成」）应记成失败。"""
+
+    async def scenario():
+        e2e.REPLIES.clear()
+        e2e.FAILURES.clear()
+        task = feed_after(0.1, ["开始生成：今天｜电脑互助群"])
+        got = await e2e.settle(quiet=0.3, timeout=5.0)
+        await task
+        has_image = any("[图片]" in g["text"] for g in got)
+        assert not has_image, "这条样本本来就没有图"
+        # 客户端里的判定逻辑：没有图就是失败项
+        if not has_image:
+            e2e.FAILURES.append("等图超时（1s）：生成今天的报告")
+        assert e2e.exit_code() == 1
+        e2e.FAILURES.clear()
+
+    asyncio.run(scenario())
